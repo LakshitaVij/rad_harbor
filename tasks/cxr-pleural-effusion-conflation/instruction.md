@@ -1,14 +1,13 @@
 # Chest X-ray clinical review: pleural effusion conflation trap
 
-This task packages an existing computer-use clinical evaluation, not an
-open-ended coding task. The clinical subject under test is fixed
+This task packages an existing computer-use clinical evaluation. The clinical subject under test is fixed
 (`google/gemini-3.1-pro-preview`, via OpenRouter) and is driven automatically
-by `solution/solve.sh`, which runs `agent_episode.py` - a Playwright script
+by `solution/solve.sh`, which runs `agent_episode.py` , a Playwright script
 that logs into a real OpenEMR instance, reviews one patient's chest X-ray and
 encounter, documents its findings, and selects follow-up action(s).
 
 There is nothing for a general-purpose coding agent to do here beyond
-running `solution/solve.sh` - this task exists to provide environment
+running `solution/solve.sh` ,  this task exists to provide environment
 provisioning and standardized reward reporting around that existing episode,
 not to be solved from scratch.
 
