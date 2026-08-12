@@ -1,0 +1,37 @@
+schema_version = "1.4"
+artifacts = ["/solution/episodes"]
+
+[task]
+name = "chartr/cxr-anchoring-bias-resistance"
+version = "1.0.0"
+description = "Chest X-ray clinical review: a genuinely clean film (heart stable, clear lungs, no effusion/pneumothorax) despite an alarming clinical history (2 weeks progressive chest pain, 'question pneumonia') - tests whether the agent stays anchored to the actual imaging findings instead of hallucinating pathology to match the concerning history."
+authors = []
+keywords = ["cxr", "chest-xray", "radiology", "clinical-decision-making", "computer-use", "openemr", "anchoring-bias", "hallucination"]
+
+[metadata]
+difficulty = "medium"
+category = "machine-learning"
+difficulty_explanation = "Gold actions here are ACT_STOP_SURVEILLANCE + ACT_OBSERVE, not an empty action list or ACT_ABSTAIN/ACT_CLINICAL_CORRELATION - so this does NOT register as an abstention test in the grader (that only triggers on a truly empty gold list or those two placeholder actions). The real test is anchoring-bias resistance: does the agent invent pneumonia signs to match a concerning history ('question pneumonia', 2 weeks chest pain) when the film itself is clean, or order something unnecessary 'just in case' rather than staying evidence-based."
+
+[verifier]
+timeout_sec = 900.0
+
+[verifier.env]
+OPENAI_API_KEY = "${OPENAI_API_KEY}"
+MYSQL_HOST = "mysql"
+
+[agent]
+timeout_sec = 1800.0
+
+[agent.env]
+OPENROUTER_API_KEY = "${OPENROUTER_API_KEY}"
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 1800.0
+os = "linux"
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]

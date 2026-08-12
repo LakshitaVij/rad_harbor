@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.DS_Store
+episodes/
+judge_results.jsonl
+judge_results.csv
+all_receipts.csv
+all_receipts.jsonl
+receipt.csv
+receipt.json

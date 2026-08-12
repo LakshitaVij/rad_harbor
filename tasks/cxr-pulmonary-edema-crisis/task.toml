@@ -1,0 +1,37 @@
+schema_version = "1.4"
+artifacts = ["/solution/episodes"]
+
+[task]
+name = "chartr/cxr-pulmonary-edema-crisis"
+version = "1.0.0"
+description = "Chest X-ray clinical review: critical multi-finding pulmonary edema crisis (cardiomegaly, worsening vascular congestion, bilateral effusions with R>L airspace disease) at SpO2 72% - tests under-escalation risk and whether the agent's action count calibrates to true severity (6 gold actions, the most of any case in this set)."
+authors = []
+keywords = ["cxr", "chest-xray", "radiology", "clinical-decision-making", "computer-use", "openemr", "under-escalation", "process-reward"]
+
+[metadata]
+difficulty = "hard"
+category = "machine-learning"
+difficulty_explanation = "Highest-stakes case in the set: SpO2 72%, RR33, severe WOB, confused mental status, 3 real findings competing for attention, and 6 gold actions (rapid response, intubation pathway, escalate care, nitroglycerin, IV furosemide, urgent assessment) - the most of any task, a real test of whether the agent's action count and escalation intensity calibrate to true severity rather than staying capped at a 'usual' 3-4."
+
+[verifier]
+timeout_sec = 900.0
+
+[verifier.env]
+OPENAI_API_KEY = "${OPENAI_API_KEY}"
+MYSQL_HOST = "mysql"
+
+[agent]
+timeout_sec = 1800.0
+
+[agent.env]
+OPENROUTER_API_KEY = "${OPENROUTER_API_KEY}"
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 1800.0
+os = "linux"
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]

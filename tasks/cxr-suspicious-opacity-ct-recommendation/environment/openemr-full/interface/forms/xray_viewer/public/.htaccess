@@ -1,0 +1,9 @@
+##
+## Only rewrite requests aimed at dicomweb_proxy.php itself - this
+## directory also serves real static files (built JS/CSS, index.php),
+## which must NOT be swallowed by a catch-all rewrite (unlike
+## apis/.htaccess, which can safely rewrite everything since apis/ has
+## no static assets of its own).
+##
+RewriteEngine On
+RewriteRule ^dicomweb_proxy\.php/(.*)$ dicomweb_proxy.php?_path=$1 [QSA,L]

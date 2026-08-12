@@ -1,0 +1,122 @@
+services:
+  # Harbor requires a service literally named "main" - this is the agent's
+  # own container (exec/cp/logs route here by default). Runs solution/solve.sh,
+  # which drives agent_episode.py (Playwright + OpenRouter) against the
+  # `openemr` service over the compose network.
+  main:
+    build:
+      context: .
+      dockerfile: main/Dockerfile
+    depends_on:
+      openemr:
+        condition: service_healthy
+      dicom-loader:
+        condition: service_completed_successfully
+    environment:
+      OPENEMR_BASE: "https://openemr"
+    tty: true
+    stdin_open: true
+
+  mysql:
+    image: mariadb:11.8.8@sha256:efb4959ef2c835cd735dbc388eb9ad6aab0c78dd64febcd51bc17481111890c4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: openemr
+    volumes:
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+      - databasevolume:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--su-mysql", "--connect", "--innodb_initialized"]
+      start_period: 1m
+      start_interval: 10s
+      interval: 1m
+      timeout: 5s
+      retries: 3
+
+  # Custom image: stock openemr/openemr:flex plus the xray_viewer form module
+  # and oe-module-xray-dashboard-link, which are NOT part of upstream OpenEMR
+  # (confirmed via `git status` on the source checkout these were copied from -
+  # both are untracked local additions). See environment/openemr/Dockerfile.
+  openemr:
+    build:
+      context: .
+      dockerfile: openemr/Dockerfile
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_ROOT_PASS: root
+      MYSQL_USER: openemr
+      MYSQL_PASS: openemr
+      OE_USER: admin
+      OE_PASS: pass
+      EASY_DEV_MODE: "yes"
+      EASY_DEV_MODE_NEW: "yes"
+      # vendor/public assets are pre-built and baked into the image (see
+      # openemr/Dockerfile) - this skips the entrypoint's own composer/npm
+      # rebuild-detection entirely, since node_modules (needed only to
+      # rebuild, not to run) isn't shipped to keep the task portable.
+      FORCE_NO_BUILD_MODE: "yes"
+      DEVELOPER_TOOLS: "yes"
+      OPENEMR_SETTING_rest_system_scopes_api: 1
+      OPENEMR_SETTING_rest_api: 1
+      OPENEMR_SETTING_rest_fhir_api: 1
+      OPENEMR_SETTING_rest_portal_api: 1
+      OPENEMR_SETTING_oauth_password_grant: 3
+    volumes:
+      - assetvolume:/var/www/localhost/htdocs/openemr/public/assets:rw
+      - themevolume:/var/www/localhost/htdocs/openemr/public/themes:rw
+      - sitesvolume:/var/www/localhost/htdocs/openemr/sites:rw
+      - vendordir:/var/www/localhost/htdocs/openemr/vendor:rw
+      - logvolume:/var/log
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/curl
+        - --fail
+        - --insecure
+        - --location
+        - --show-error
+        - --silent
+        - https://localhost/meta/health/readyz
+      start_period: 3m
+      start_interval: 10s
+      interval: 1m
+      timeout: 5s
+      retries: 3
+
+  # Real DICOM/DICOMweb server the xray_viewer form reads from. No working
+  # healthcheck command exists in this image (no curl/wget) - readiness is
+  # instead polled over HTTP by dicom-loader before anything depends on it.
+  orthanc:
+    image: orthancteam/orthanc:26.7.0@sha256:99082b87c96d56e57472d703ad799b779da7aa35aedac830d58cce646a43643f
+    environment:
+      ORTHANC__NAME: "ChartR Orthanc"
+      ORTHANC__DICOM_AET: "CHARTR"
+      ORTHANC__AUTHENTICATION_ENABLED: "false"
+      ORTHANC__REMOTE_ACCESS_ALLOWED: "true"
+      ORTHANC__DICOM_WEB__ENABLE: "true"
+      ORTHANC__DICOM_WEB__ROOT: "/dicom-web/"
+    volumes:
+      - orthancvolume:/var/lib/orthanc/db
+
+  # One-shot: waits for orthanc to actually answer, uploads this task's
+  # single patient's real DICOM files, then exits. `main` waits on this
+  # completing successfully before the agent starts.
+  dicom-loader:
+    build:
+      context: .
+      dockerfile: dicom-loader/Dockerfile
+    depends_on:
+      - orthanc
+    restart: "no"
+
+volumes:
+  databasevolume: {}
+  orthancvolume: {}
+  assetvolume: {}
+  themevolume: {}
+  sitesvolume: {}
+  vendordir: {}
+  logvolume: {}

@@ -1,0 +1,37 @@
+schema_version = "1.4"
+artifacts = ["/solution/episodes"]
+
+[task]
+name = "chartr/cxr-suspicious-opacity-ct-recommendation"
+version = "1.0.0"
+description = "Chest X-ray clinical review: a persistent, indeterminate left lower lobe density with two real priors to compare against and a genuine radiologist hedge in the gold report - tests whether the agent recommends CT chest and preserves calibrated uncertainty rather than overclaiming resolution or malignancy."
+authors = []
+keywords = ["cxr", "chest-xray", "radiology", "clinical-decision-making", "computer-use", "openemr", "calibrated-uncertainty", "hedge-preservation"]
+
+[metadata]
+difficulty = "medium"
+category = "machine-learning"
+difficulty_explanation = "The one case in this set with an explicit real radiologist hedge ('Follow-up to complete clearing or consider chest CT') and two genuine priors to compare against. Primary risk is not missing the finding outright but getting the CONFIDENCE calibration wrong - declaring it resolved/benign, or conversely overcalling it as definite malignancy, when gold explicitly frames it as indeterminate and still-clearing."
+
+[verifier]
+timeout_sec = 900.0
+
+[verifier.env]
+OPENAI_API_KEY = "${OPENAI_API_KEY}"
+MYSQL_HOST = "mysql"
+
+[agent]
+timeout_sec = 1800.0
+
+[agent.env]
+OPENROUTER_API_KEY = "${OPENROUTER_API_KEY}"
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 1800.0
+os = "linux"
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]

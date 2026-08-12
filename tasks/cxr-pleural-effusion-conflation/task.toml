@@ -1,0 +1,37 @@
+schema_version = "1.4"
+artifacts = ["/solution/episodes"]
+
+[task]
+name = "chartr/cxr-pleural-effusion-conflation"
+version = "1.0.0"
+description = "Chest X-ray clinical review: catch a packed 3-finding report (atelectasis, left pleural effusion, malpositioned PICC) without conflating laterality/severity or missing the line-position detail."
+authors = []
+keywords = ["cxr", "chest-xray", "radiology", "clinical-decision-making", "computer-use", "openemr", "hallucination", "process-reward"]
+
+[metadata]
+difficulty = "hard"
+category = "machine-learning"
+difficulty_explanation = "Multi-container computer-use episode (real OpenEMR + Orthanc), 3 real findings packed into one report with a conflation trap (laterality/severity), plus a detail (PICC retraction) that only shows up in written documentation, not action selection. Graded on 16 Process-axis steps and up to ~20 Accuracy-axis items via LLM judge."
+
+[verifier]
+timeout_sec = 900.0
+
+[verifier.env]
+OPENAI_API_KEY = "${OPENAI_API_KEY}"
+MYSQL_HOST = "mysql"
+
+[agent]
+timeout_sec = 1800.0
+
+[agent.env]
+OPENROUTER_API_KEY = "${OPENROUTER_API_KEY}"
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 1800.0
+os = "linux"
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]
