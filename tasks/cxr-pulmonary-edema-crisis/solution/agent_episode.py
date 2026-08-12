@@ -58,11 +58,12 @@ OPENEMR_BASE = os.environ.get("OPENEMR_BASE", "https://localhost:9300")
 OPENEMR_USER = "admin"
 OPENEMR_PASS = "pass"
 MODEL = "google/gemini-3.1-pro-preview"  # newest multimodal Gemini Pro on OpenRouter (resolved from the ~google/gemini-pro-latest alias)
-MAX_STEPS_DEFAULT = 50
-# Was 30 - confirmed too tight across 4 real graded episodes: 3 of 4 never
-# reached documentation/action-selection at all, burning the full budget on
-# OpenEMR navigation alone (login -> patient search -> encounter -> vitals
-# -> history -> X-ray, before any note-writing even starts).
+MAX_STEPS_DEFAULT = 120
+# Was 30, then 50 - still cutting episodes short before they reached
+# documentation/action-selection. Not fully uncapped: a genuinely stuck
+# agent (confirmed real behavior - repeated identical clicks in several
+# episodes) would otherwise loop forever at real OpenRouter cost with no
+# bound. 120 gives generous headroom while keeping a real ceiling.
 VIEWPORT = {"width": 1600, "height": 1000}
 
 EPISODES_DIR = Path(__file__).parent / "episodes"
