@@ -242,6 +242,11 @@ def grade_episode(episode_dir: Path) -> dict:
             })
         rows.append({
             "axis": axis_label, "item": f"[{item.match_status}] {description}",
+            "component": "match_status_penalty", "points": item._match_penalty,
+            "note": f"{item.match_status} penalty",
+        })
+        rows.append({
+            "axis": axis_label, "item": f"[{item.match_status}] {description}",
             "component": "TOTAL (sum of components above)", "points": round(item.raw_total, 2), "note": item.reasoning,
         })
 

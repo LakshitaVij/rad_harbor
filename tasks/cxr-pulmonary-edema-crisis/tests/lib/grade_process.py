@@ -61,9 +61,11 @@ of the old standalone-viewer-first order):
     able to swing the total further negative than a fixed-range check
     would allow.
 
-Ground truth patient/encounter comes from a direct DB query (same
-`docker compose exec mysql` pattern used throughout this session), not
-hardcoded - so this grader stays correct if the seed data changes.
+Ground truth patient/encounter comes from a [[verifier.collect]]-dumped
+snapshot of the real DB (queried once, inside the `mysql` service itself,
+after the agent's container is stopped - not a live connection this
+process makes), not hardcoded - so this grader stays correct if the seed
+data changes, without the verifier ever needing direct DB credentials.
 """
 
 from __future__ import annotations
@@ -71,18 +73,19 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 from pathlib import Path
 
 import openpyxl
 
 ACTION_LIBRARY_XLSX = Path(__file__).resolve().parent.parent / "gold" / "pulmonary_action_library_with_2026_guideline_rewards.xlsx"
 
-# Harbor packaging: MYSQL_HOST is the compose service hostname (default
-# "mysql", reachable directly over the compose network from `main` since
-# the verifier runs in the same container as the agent by default) -
-# overridable via env var for anything that isn't the standard task layout.
-MYSQL_HOST = os.environ.get("MYSQL_HOST", "mysql")
+# Harbor packaging (environment_mode = "separate"): the verifier no longer
+# makes a live SQL connection to `mysql` - a [[verifier.collect]] hook runs
+# inside the `mysql` service itself, after Harbor has already stopped the
+# agent's `main` container, and dumps exactly the ground truth this file
+# needs to one file. That file transfers in as a declared artifact and
+# lands here; overridable via env var for local testing outside Harbor.
+GROUND_TRUTH_DUMP_PATH = Path(os.environ.get("GROUND_TRUTH_DUMP_PATH", "/logs/artifacts/ground_truth.tsv"))
 
 # The 3 actions added this session that aren't in the xlsx - same
 # can_combine/mutually_exclusive_group defaults used when they were
@@ -140,17 +143,38 @@ def _match_action_id(level_2_label: str) -> str | None:
     return None
 
 
-def _run_sql(sql: str) -> str:
-    # Harbor packaging: connect directly to the `mysql` compose service over
-    # the network (main and mysql share a compose network, so this is
-    # reachable by hostname) instead of shelling into a host-side `docker
-    # compose exec` - same client, same TSV-on-stdout output shape every
-    # caller here already parses, just a different transport.
-    result = subprocess.run(
-        ["mariadb", "-h", MYSQL_HOST, "-uroot", "-proot", "openemr", "-e", sql],
-        capture_output=True, text=True, check=True,
-    )
-    return result.stdout
+_ground_truth_sections_cache: dict[str, list[str]] | None = None
+
+
+def _load_ground_truth_sections() -> dict[str, list[str]]:
+    """Parses the [[verifier.collect]]-produced dump at
+    GROUND_TRUTH_DUMP_PATH into {section_label: [output lines]}, one
+    section per "===LABEL===" marker the collect script wrote - same
+    mariadb TSV-with-header-row shape the old live _run_sql calls
+    returned, just read from a pre-collected file instead of a live
+    connection. Cached - the file is static for the lifetime of one
+    grading run."""
+    global _ground_truth_sections_cache
+    if _ground_truth_sections_cache is not None:
+        return _ground_truth_sections_cache
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in GROUND_TRUTH_DUMP_PATH.read_text().splitlines():
+        if line.startswith("===") and line.endswith("==="):
+            current = line[3:-3]
+            sections[current] = []
+        elif current is not None:
+            sections[current].append(line)
+    _ground_truth_sections_cache = sections
+    return sections
+
+
+def _section_data_lines(label: str) -> list[str]:
+    """A section's data rows with the header row dropped - matches the old
+    _run_sql callers' `out.strip().splitlines()[1:]` pattern exactly, just
+    against a pre-collected section instead of a live query's stdout."""
+    lines = [l for l in _load_ground_truth_sections().get(label, []) if l.strip() or l == ""]
+    return lines[1:] if lines else []
 
 
 def _all_urls(page_state: dict) -> str:
@@ -163,14 +187,11 @@ def _all_urls(page_state: dict) -> str:
 
 
 def ground_truth_pid_encounter(patient_id: str, visit_date: str) -> tuple[int | None, int | None]:
-    """Real (pid, encounter_id) for this patient's visit, via direct DB
-    query - not hardcoded, so this stays correct if seed data changes."""
-    out = _run_sql(
-        "SELECT pd.pid, fe.encounter FROM patient_data pd "
-        "JOIN form_encounter fe ON fe.pid=pd.pid "
-        f"WHERE pd.lname='{patient_id}' AND DATE(fe.date)='{visit_date}';"
-    )
-    lines = [l for l in out.strip().splitlines()[1:] if l.strip()]
+    """Real (pid, encounter_id) for this patient's visit - resolved by the
+    [[verifier.collect]] hook's PID_ENCOUNTER query (baked with this
+    task's own patient_id/visit_date at collect time, not queried live
+    here). Params kept for call-site compatibility."""
+    lines = _section_data_lines("PID_ENCOUNTER")
     if not lines:
         return None, None
     pid, encounter = lines[0].split("\t")
@@ -200,16 +221,12 @@ def read_all_note_forms(patient_id: str, visit_date: str) -> dict[str, dict[str,
         return {}
     found = {}
     for formdir, (table, fields) in NOTE_FORM_REGISTRY.items():
-        field_list = ", ".join(f"s.{f}" for f in fields)
-        try:
-            out = _run_sql(
-                f"SELECT {field_list} FROM forms f JOIN {table} s ON s.id = f.form_id "
-                f"WHERE f.pid={true_pid} AND f.encounter={true_encounter} AND f.formdir='{formdir}' "
-                "ORDER BY f.id DESC LIMIT 1;"
-            )
-        except subprocess.CalledProcessError:
-            continue  # table doesn't exist in this OpenEMR install - skip, not fatal
-        lines = [l for l in out.strip().splitlines()[1:] if l.strip() or l == ""]
+        # Collect script already handles tables that don't exist in this
+        # OpenEMR install (2>/dev/null || true per section) - an absent or
+        # empty NOTE_FORM:<formdir> section here is indistinguishable from
+        # "queried fine, no row saved," same as the old skip-not-fatal
+        # behavior.
+        lines = _section_data_lines(f"NOTE_FORM:{formdir}")
         if not lines:
             continue
         values = lines[0].split("\t")
@@ -321,11 +338,10 @@ def _form_exists(pid: int, encounter: int, formdir: str) -> bool:
     """Ground truth: does this encounter actually have a form of this type
     attached at all? Needed for Z1.5's "only if given" rule - an encounter
     with no Office Visit/newpatient form shouldn't penalize the agent for
-    not engaging with something that was never there."""
-    out = _run_sql(
-        f"SELECT COUNT(*) FROM forms WHERE formdir='{formdir}' AND pid={pid} AND encounter={encounter} AND deleted=0;"
-    )
-    lines = [l for l in out.strip().splitlines()[1:] if l.strip()]
+    not engaging with something that was never there. Sourced from the
+    collect hook's FORM_EXISTS:<formdir> section - only 'newpatient' is
+    ever queried, which is exactly what the collect script dumps."""
+    lines = _section_data_lines(f"FORM_EXISTS:{formdir}")
     return bool(lines) and lines[0] != "0"
 
 

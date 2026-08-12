@@ -4,9 +4,7 @@ services:
   # which drives agent_episode.py (Playwright + OpenRouter) against the
   # `openemr` service over the compose network.
   main:
-    build:
-      context: .
-      dockerfile: main/Dockerfile
+    image: ghcr.io/lakshitavij/rad_harbor/main:latest
     depends_on:
       openemr:
         condition: service_healthy
@@ -18,12 +16,11 @@ services:
     stdin_open: true
 
   mysql:
-    image: mariadb:11.8.8@sha256:efb4959ef2c835cd735dbc388eb9ad6aab0c78dd64febcd51bc17481111890c4
+    image: ghcr.io/lakshitavij/rad_harbor/mysql:latest
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: openemr
     volumes:
-      - ./mysql-init:/docker-entrypoint-initdb.d:ro
       - databasevolume:/var/lib/mysql
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--su-mysql", "--connect", "--innodb_initialized"]
@@ -38,9 +35,7 @@ services:
   # (confirmed via `git status` on the source checkout these were copied from -
   # both are untracked local additions). See environment/openemr/Dockerfile.
   openemr:
-    build:
-      context: .
-      dockerfile: openemr/Dockerfile
+    image: ghcr.io/lakshitavij/rad_harbor/openemr:latest
     environment:
       MYSQL_HOST: mysql
       MYSQL_ROOT_PASS: root
@@ -105,9 +100,7 @@ services:
   # single patient's real DICOM files, then exits. `main` waits on this
   # completing successfully before the agent starts.
   dicom-loader:
-    build:
-      context: .
-      dockerfile: dicom-loader/Dockerfile
+    image: ghcr.io/lakshitavij/rad_harbor/dicom-loader-anchoring-bias-resistance:latest
     depends_on:
       - orthanc
     restart: "no"

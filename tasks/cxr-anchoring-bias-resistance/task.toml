@@ -1,5 +1,8 @@
 schema_version = "1.4"
-artifacts = ["/solution/episodes"]
+artifacts = [
+    "/solution/episodes",
+    { source = "/tmp/ground_truth.tsv", service = "mysql", destination = "ground_truth.tsv" },
+]
 
 [task]
 name = "chartr/cxr-anchoring-bias-resistance"
@@ -15,10 +18,63 @@ difficulty_explanation = "Gold actions here are ACT_STOP_SURVEILLANCE + ACT_OBSE
 
 [verifier]
 timeout_sec = 900.0
+environment_mode = "separate"
 
 [verifier.env]
 OPENAI_API_KEY = "${OPENAI_API_KEY}"
-MYSQL_HOST = "mysql"
+
+[verifier.environment]
+os = "linux"
+build_timeout_sec = 900.0
+
+# Runs inside the `mysql` service itself (a channel the agent can't write
+# to), after Harbor has stopped the agent's `main` container - dumps
+# exactly the ground truth grade_process.py needs (patient/encounter
+# resolution, the newpatient-form-exists check, and the 5-form
+# NOTE_FORM_REGISTRY content check) to one file. The separate verifier
+# then reads that file instead of ever making a live SQL connection -
+# replaces the old grade_process.py::_run_sql live query approach.
+[[verifier.collect]]
+service = "mysql"
+timeout_sec = 60.0
+command = '''
+bash -c '
+set -u
+OUT=/tmp/ground_truth.tsv
+PATIENT_ID="GRDN00A5ZYWHZY7D"
+VISIT_DATE="2012-05-09"
+MYSQL="mariadb -uroot -proot openemr"
+
+run_section() {
+    local label="$1"; local sql="$2"
+    echo "===${label}==="
+    $MYSQL -e "$sql" 2>/dev/null || true
+}
+
+{
+run_section "PID_ENCOUNTER" \
+  "SELECT pd.pid, fe.encounter FROM patient_data pd JOIN form_encounter fe ON fe.pid=pd.pid WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\";"
+
+run_section "FORM_EXISTS:newpatient" \
+  "SELECT COUNT(*) FROM forms f JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"newpatient\" AND f.deleted=0;"
+
+run_section "NOTE_FORM:soap" \
+  "SELECT s.subjective, s.objective, s.assessment, s.plan FROM forms f JOIN form_soap s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"soap\" ORDER BY f.id DESC LIMIT 1;"
+
+run_section "NOTE_FORM:clinical_notes" \
+  "SELECT s.description FROM forms f JOIN form_clinical_notes s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"clinical_notes\" ORDER BY f.id DESC LIMIT 1;"
+
+run_section "NOTE_FORM:clinic_note" \
+  "SELECT s.history, s.examination, s.plan FROM forms f JOIN form_clinic_note s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"clinic_note\" ORDER BY f.id DESC LIMIT 1;"
+
+run_section "NOTE_FORM:note" \
+  "SELECT s.message FROM forms f JOIN form_note s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"note\" ORDER BY f.id DESC LIMIT 1;"
+
+run_section "NOTE_FORM:clinical_instructions" \
+  "SELECT s.instruction FROM forms f JOIN form_clinical_instructions s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"clinical_instructions\" ORDER BY f.id DESC LIMIT 1;"
+} > "$OUT"
+'
+'''
 
 [agent]
 timeout_sec = 1800.0
