@@ -5,6 +5,8 @@ services:
   # `openemr` service over the compose network.
   main:
     image: ghcr.io/lakshitavij/rad_harbor/main:latest
+    networks:
+      - default
     depends_on:
       openemr:
         condition: service_healthy
@@ -15,8 +17,14 @@ services:
     tty: true
     stdin_open: true
 
+  # Only on db_net (internal, no route from main/orthanc/dicom-loader): the
+  # separate verifier's [[verifier.collect]] hook execs inside this
+  # container directly (not over the network), so mysql never needs to be
+  # reachable by anything except openemr.
   mysql:
     image: ghcr.io/lakshitavij/rad_harbor/mysql:latest
+    networks:
+      - db_net
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: openemr
@@ -34,8 +42,14 @@ services:
   # and oe-module-xray-dashboard-link, which are NOT part of upstream OpenEMR
   # (confirmed via `git status` on the source checkout these were copied from -
   # both are untracked local additions). See environment/openemr/Dockerfile.
+  # On both networks: default to be reachable by main and to reach
+  # orthanc (its DICOMweb proxy calls Orthanc server-side - main's browser
+  # never talks to Orthanc directly), db_net to reach mysql.
   openemr:
     image: ghcr.io/lakshitavij/rad_harbor/openemr:latest
+    networks:
+      - default
+      - db_net
     environment:
       MYSQL_HOST: mysql
       MYSQL_ROOT_PASS: root
@@ -86,6 +100,8 @@ services:
   # instead polled over HTTP by dicom-loader before anything depends on it.
   orthanc:
     image: orthancteam/orthanc:26.7.0@sha256:99082b87c96d56e57472d703ad799b779da7aa35aedac830d58cce646a43643f
+    networks:
+      - default
     environment:
       ORTHANC__NAME: "ChartR Orthanc"
       ORTHANC__DICOM_AET: "CHARTR"
@@ -101,6 +117,8 @@ services:
   # completing successfully before the agent starts.
   dicom-loader:
     image: ghcr.io/lakshitavij/rad_harbor/dicom-loader-pleural-effusion-conflation:latest
+    networks:
+      - default
     depends_on:
       - orthanc
     restart: "no"
@@ -113,3 +131,11 @@ volumes:
   sitesvolume: {}
   vendordir: {}
   logvolume: {}
+
+networks:
+  default: {}
+  # No route from main/orthanc/dicom-loader - only openemr and mysql sit
+  # here. internal: true also blocks this network from reaching the
+  # outside world, which mysql never needs.
+  db_net:
+    internal: true

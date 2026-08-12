@@ -143,11 +143,13 @@ class FindingScoreItem(BaseModel):
         "scoring" something already implied by match_status itself. Derived
         here instead of asked for, removing the risk of an inconsistent
         combination (e.g. match_status="missed_by_model" but a model output
-        of false_negatives=+1). Missed and hallucinated are penalized
-        equally (-2 each) - a hallucinated finding isn't a lesser error than
-        a missed one, it can actively drive a clinician toward the wrong
-        workup based on something that isn't real."""
-        return {"matched": 1.0, "missed_by_model": -2.0, "hallucinated_by_model": -2.0}[self.match_status]
+        of false_negatives=+1). Kept asymmetric (missed worse than
+        hallucinated) for consistency with A2/A3's match_status penalty and
+        Z2.12's action-count calibration - briefly made symmetric (-2/-2),
+        reverted since there's no real reason findings specifically should
+        be the one axis that treats a fabricated item as equally bad as a
+        missed one when every other axis doesn't."""
+        return {"matched": 1.0, "missed_by_model": -2.0, "hallucinated_by_model": -1.0}[self.match_status]
 
     @property
     def raw_total(self) -> float:

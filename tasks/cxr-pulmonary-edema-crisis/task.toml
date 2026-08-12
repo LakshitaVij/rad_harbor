@@ -59,19 +59,19 @@ run_section "FORM_EXISTS:newpatient" \
   "SELECT COUNT(*) FROM forms f JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"newpatient\" AND f.deleted=0;"
 
 run_section "NOTE_FORM:soap" \
-  "SELECT s.subjective, s.objective, s.assessment, s.plan FROM forms f JOIN form_soap s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"soap\" ORDER BY f.id DESC LIMIT 1;"
+  "SELECT f.date, s.subjective, s.objective, s.assessment, s.plan FROM forms f JOIN form_soap s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"soap\" ORDER BY f.id DESC LIMIT 5;"
 
 run_section "NOTE_FORM:clinical_notes" \
-  "SELECT s.description FROM forms f JOIN form_clinical_notes s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"clinical_notes\" ORDER BY f.id DESC LIMIT 1;"
+  "SELECT f.date, s.description FROM forms f JOIN form_clinical_notes s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"clinical_notes\" ORDER BY f.id DESC LIMIT 5;"
 
 run_section "NOTE_FORM:clinic_note" \
-  "SELECT s.history, s.examination, s.plan FROM forms f JOIN form_clinic_note s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"clinic_note\" ORDER BY f.id DESC LIMIT 1;"
+  "SELECT f.date, s.history, s.examination, s.plan FROM forms f JOIN form_clinic_note s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"clinic_note\" ORDER BY f.id DESC LIMIT 5;"
 
 run_section "NOTE_FORM:note" \
-  "SELECT s.message FROM forms f JOIN form_note s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"note\" ORDER BY f.id DESC LIMIT 1;"
+  "SELECT f.date, s.message FROM forms f JOIN form_note s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"note\" ORDER BY f.id DESC LIMIT 5;"
 
 run_section "NOTE_FORM:clinical_instructions" \
-  "SELECT s.instruction FROM forms f JOIN form_clinical_instructions s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"clinical_instructions\" ORDER BY f.id DESC LIMIT 1;"
+  "SELECT f.date, s.instruction FROM forms f JOIN form_clinical_instructions s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"clinical_instructions\" ORDER BY f.id DESC LIMIT 5;"
 } > "$OUT"
 '
 '''

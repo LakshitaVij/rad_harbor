@@ -20,46 +20,55 @@ of the old standalone-viewer-first order):
     attached scores +1 regardless, since there's nothing to click into.
   - Z1 steps 6-7 (open X-ray / interact with X-ray): same formname-based
     detection, now the LAST two Z1 steps instead of the first two.
+  - Z2 steps renumbered sequentially (9-13) per explicit user request - an
+    earlier revision left gaps (9, 12, 14, 15, 16) where dropped checks used
+    to sit, on purpose, so labels matched exactly what appeared in old
+    episode logs. Now fully renumbered instead, code and doc kept in sync:
+      Z2.9  Navigate to Procedures/Configuration
+      Z2.10 No mutual exclusivity conflicts
+      Z2.11 Abstention calibration
+      Z2.12 Action count calibration
+      Z2.13 Step efficiency
   - Z2.9 (navigate Procedures / Configuration): ONE check, not two - both
-    used to be separate ScoreItems (formerly Z2.9 + Z2.10) reading the
-    exact same underlying boolean ("did the log ever show a URL for
-    Configure Orders and Results, types.php"), which silently double-
-    counted a single event in the Z2 sum. Merged into one +1/-1 item.
-  - Z2.11 (valid action) was dropped entirely - it used to score
-    catalog-validity PER selected action (+1/-1 each, summed). Catalog-
-    validity is now purely an Accuracy-axis concern (A3's
-    hallucinated_by_model handles it); Process no longer scores it, though
-    the underlying catalog match still runs internally since Z2.12 and the
-    action-count check both need to know which selections are real.
-  - Z2.12 (mutual exclusivity conflicts): no longer scored per pair. Per-
+    used to be separate ScoreItems reading the exact same underlying
+    boolean ("did the log ever show a URL for Configure Orders and
+    Results, types.php"), which silently double-counted a single event in
+    the Z2 sum. Merged into one +1/-1 item.
+  - A since-removed valid-action check used to score catalog-validity PER
+    selected action (+1/-1 each, summed). Catalog-validity is now purely
+    an Accuracy-axis concern (A3's hallucinated_by_model handles it);
+    Process no longer scores it, though the underlying catalog match still
+    runs internally since Z2.10 and the action-count check both need to
+    know which selections are real.
+  - Z2.10 (mutual exclusivity conflicts): no longer scored per pair. Per-
     pair scoring made this combinatorial (C(n,2) pairs for n actions - a
     6-action episode could earn +15 from this ONE check alone, dwarfing
     every real penalty in the system). Now: each of the n selected actions
     contributes +-1/n, so the whole check always sums to within [-1,+1]
-    regardless of how many actions were selected. A parallel "can_combine"
-    check (formerly Z2.13) was dropped outright: that field is True for
-    every single action in the catalog (confirmed against the real xlsx),
-    so it could never detect a conflict and only contributed free,
+    regardless of how many actions were selected. A parallel, since-
+    removed "can_combine" check was dropped outright: that field is True
+    for every single action in the catalog (confirmed against the real
+    xlsx), so it could never detect a conflict and only contributed free,
     uninformative points that scaled with action count.
-  - Z2.15 ("too many/too few actions"): compared against THIS VISIT's
+  - Z2.12 ("too many/too few actions"): compared against THIS VISIT's
     actual gold action count (via oracle.py), not a fixed universal band
     - real visits have 1-6 gold actions, not always 1-3. Normalized by
-    gold_n like Z2.12, but keeping the original 3x asymmetry between
+    gold_n like Z2.10, but keeping the original 3x asymmetry between
     directions: -0.75/gold_n per missing action vs -0.25/gold_n per extra
     action (missing something required is worse than one harmless extra).
     Missing every gold action always costs exactly -0.75 regardless of
     visit size, instead of scaling unboundedly with task size.
-  - Z2 step 14 (abstention calibration): "should abstain" ground truth =
-    gold action list is empty OR contains ACT_ABSTAIN/
-    ACT_CLINICAL_CORRELATION. Same definition used in judge.py's A3
-    abstention handling so Process and Accuracy don't quietly disagree.
+  - Z2.11 (abstention calibration): "should abstain" ground truth = gold
+    action list is empty OR contains ACT_ABSTAIN/ACT_CLINICAL_CORRELATION.
+    Same definition used in judge.py's A3 abstention handling so Process
+    and Accuracy don't quietly disagree.
   - Z1 range [-7.5,7]. Z2 no longer scales unboundedly with action count
-    now that Z2.11 is gone and Z2.12 is normalized to [-1,+1] - only
-    Z2.15's per-action penalty (-0.25/-0.75) still grows with how far off
-    the action count is, which is intentional: a badly-miscalibrated
-    action count (e.g. Task 4's 6-action case answered with 3) should be
-    able to swing the total further negative than a fixed-range check
-    would allow.
+    now that the old valid-action check is gone and Z2.10 is normalized to
+    [-1,+1] - only Z2.12's per-action penalty (-0.25/-0.75) still grows
+    with how far off the action count is, which is intentional: a badly-
+    miscalibrated action count (e.g. Task 4's 6-action case answered with
+    3) should be able to swing the total further negative than a
+    fixed-range check would allow.
 
 Ground truth patient/encounter comes from a [[verifier.collect]]-dumped
 snapshot of the real DB (queried once, inside the `mysql` service itself,
@@ -73,6 +82,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 
 import openpyxl
@@ -211,11 +221,23 @@ NOTE_FORM_REGISTRY: dict[str, tuple[str, list[str]]] = {
 }
 
 
-def read_all_note_forms(patient_id: str, visit_date: str) -> dict[str, dict[str, str]]:
+def read_all_note_forms(patient_id: str, visit_date: str, after_ts: float | None = None) -> dict[str, dict[str, str]]:
     """Every real note-type form saved for this patient's encounter, across
     all the forms an agent might have legitimately chosen to use - not just
     one assumed form type. Returns {formdir: {field: text}} for whichever
-    forms actually have a saved row; forms with nothing saved are omitted."""
+    forms actually have a saved row; forms with nothing saved are omitted.
+
+    after_ts (a unix timestamp) restricts this to forms saved AFTER that
+    time - critical when the same patient/encounter gets used across
+    multiple episode runs (exactly what happens re-running the same
+    reference tasks repeatedly): without this, a later episode that wrote
+    NOTHING could get graded on an earlier episode's leftover saved note,
+    since `forms` rows persist in OpenEMR across runs and the collect
+    query's own NOTE_FORM:<formdir> section has no other way to tell
+    "written by this episode" apart from "written by literally any prior
+    run against this same patient/encounter" - the collect SQL returns up
+    to 5 rows per form (not just the newest) specifically so this can pick
+    the first one that's actually recent enough, not just the top row."""
     true_pid, true_encounter = ground_truth_pid_encounter(patient_id, visit_date)
     if true_pid is None:
         return {}
@@ -226,13 +248,20 @@ def read_all_note_forms(patient_id: str, visit_date: str) -> dict[str, dict[str,
         # empty NOTE_FORM:<formdir> section here is indistinguishable from
         # "queried fine, no row saved," same as the old skip-not-fatal
         # behavior.
-        lines = _section_data_lines(f"NOTE_FORM:{formdir}")
-        if not lines:
-            continue
-        values = lines[0].split("\t")
-        field_map = dict(zip(fields, values))
-        if any(v.strip() for v in field_map.values()):
-            found[formdir] = field_map
+        rows = _section_data_lines(f"NOTE_FORM:{formdir}")
+        for row in rows:
+            date_str, *values = row.split("\t")
+            if after_ts is not None:
+                try:
+                    row_ts = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").timestamp()
+                except ValueError:
+                    continue
+                if row_ts < after_ts:
+                    continue
+            field_map = dict(zip(fields, values))
+            if any(v.strip() for v in field_map.values()):
+                found[formdir] = field_map
+            break  # rows are ORDER BY f.id DESC - first qualifying row is the one we want
     return found
 
 
@@ -460,13 +489,13 @@ def score_z2_actions(selected_actions: list[dict], gold_action_ids: list[str]) -
     selected action) - an agent hallucinating a nonexistent action is an
     Accuracy-axis concern (A3's hallucinated_by_model), not a Process one.
     Matching against the catalog still has to happen internally, though -
-    Z2.12 and the action-count check below both need to know which
+    Z2.10 and the action-count check below both need to know which
     selections are real actions."""
     items = []
     valid_ids = [_match_action_id(sa.get("level_2", "")) for sa in selected_actions]
     valid_ids = [a for a in valid_ids if a is not None]
 
-    # Z2.12: mutual exclusivity - one non-scaling check, not scored per pair
+    # Z2.10: mutual exclusivity - one non-scaling check, not scored per pair
     # (per-pair scoring made this combinatorial: C(n,2) pairs meant a
     # 6-action episode could earn +15 from this single check alone,
     # dwarfing every real penalty in the system). Each of the n selected
@@ -483,11 +512,11 @@ def score_z2_actions(selected_actions: list[dict], gold_action_ids: list[str]) -
         per_action = 1.0 / n
         points = round(sum(per_action if not c else -per_action for c in conflicted), 3)
         n_conflicted = sum(conflicted)
-        items.append(ScoreItem("Z2.12 No mutual exclusivity conflicts", points,
+        items.append(ScoreItem("Z2.10 No mutual exclusivity conflicts", points,
                                 f"{n - n_conflicted}/{n} action(s) conflict-free."))
 
     # "Too many/too few" relative to THIS visit's real gold count - normalized
-    # by gold_n like Z2.12, but keeping the original 3x asymmetry: missing a
+    # by gold_n like Z2.10, but keeping the original 3x asymmetry: missing a
     # required action is worse than adding an extra one (real clinical stance
     # - under-treating is generally worse than one harmless extra), so
     # missing costs -0.75/gold_n per action vs -0.25/gold_n for extras.
@@ -497,11 +526,11 @@ def score_z2_actions(selected_actions: list[dict], gold_action_ids: list[str]) -
     if model_n > gold_n:
         extra = model_n - gold_n
         penalty = round(-0.25 * (extra / gold_n), 3) if gold_n > 0 else -0.25 * extra
-        items.append(ScoreItem("Z2.15 Action count calibration", penalty, f"Selected {model_n} actions vs. {gold_n} expected - {extra} too many."))
+        items.append(ScoreItem("Z2.12 Action count calibration", penalty, f"Selected {model_n} actions vs. {gold_n} expected - {extra} too many."))
     elif model_n < gold_n and gold_n > 0:
         missing = gold_n - model_n
         penalty = round(-0.75 * (missing / gold_n), 3)
-        items.append(ScoreItem("Z2.15 Action count calibration", penalty, f"Selected {model_n} actions vs. {gold_n} expected - {missing} too few."))
+        items.append(ScoreItem("Z2.12 Action count calibration", penalty, f"Selected {model_n} actions vs. {gold_n} expected - {missing} too few."))
 
     return items, valid_ids
 
@@ -511,12 +540,12 @@ def score_z2_abstention(valid_ids: list[str], gold_action_ids: list[str]) -> Sco
     model_abstained = len(valid_ids) == 0 or any(a in ABSTAIN_ACTION_IDS for a in valid_ids)
 
     if gold_says_abstain and model_abstained:
-        return ScoreItem("Z2.14 Abstention calibration", 1, "Gold expected abstention, agent abstained.")
+        return ScoreItem("Z2.11 Abstention calibration", 1, "Gold expected abstention, agent abstained.")
     if not gold_says_abstain and model_abstained:
-        return ScoreItem("Z2.14 Abstention calibration", -2, "Gold expected real action(s), agent abstained instead.")
+        return ScoreItem("Z2.11 Abstention calibration", -2, "Gold expected real action(s), agent abstained instead.")
     if gold_says_abstain and not model_abstained:
-        return ScoreItem("Z2.14 Abstention calibration", 0.25, "Gold expected abstention, agent acted anyway.")
-    return ScoreItem("Z2.14 Abstention calibration", 1, "Gold expected real action(s), agent acted.")
+        return ScoreItem("Z2.11 Abstention calibration", 0.25, "Gold expected abstention, agent acted anyway.")
+    return ScoreItem("Z2.11 Abstention calibration", 1, "Gold expected real action(s), agent acted.")
 
 
 STEP_EFFICIENCY_FIXED_OVERHEAD = 15
@@ -562,9 +591,9 @@ def _episode_fully_completed(process_items: list[ScoreItem]) -> bool:
     ]
     if not all(_all_positive(s) for s in required_clean):
         return False
-    if any(p < 0 for p in by_step.get("Z2.12 No mutual exclusivity conflicts", [])):
+    if any(p < 0 for p in by_step.get("Z2.10 No mutual exclusivity conflicts", [])):
         return False
-    if "Z2.15 Action count calibration" in by_step:  # any row here means the count didn't match exactly
+    if "Z2.12 Action count calibration" in by_step:  # any row here means the count didn't match exactly
         return False
     doc_points = by_step.get("Documentation actually saved", [])
     if not doc_points or doc_points[0] != 1:
@@ -598,7 +627,7 @@ def score_step_efficiency(entries: list[dict], process_items: list[ScoreItem], g
         f"{'Fully completed' if fully_completed else 'NOT fully completed (skipped/failed a required checkpoint)'}, "
         f"{extra_steps} step(s) over minimum."
     )
-    return ScoreItem("Z2.16 Step efficiency", points, note)
+    return ScoreItem("Z2.13 Step efficiency", points, note)
 
 
 def grade_process(log_path: Path, patient_id: str, visit_date: str, gold_action_ids: list[str]) -> list[ScoreItem]:

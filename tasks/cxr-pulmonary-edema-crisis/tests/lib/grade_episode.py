@@ -158,6 +158,82 @@ def _load_episode_summary(log_path: Path) -> dict:
     }
 
 
+# Process axis bounds are fixed - identical for every episode regardless of
+# task complexity, a direct result of normalizing Z2.10/Z2.12 by action
+# count. Accuracy bounds are NOT fixed - they scale with how many real gold
+# findings/diagnoses/actions this specific visit has, so they're computed
+# per-episode below instead of hardcoded.
+PROCESS_FLOOR, PROCESS_CEILING = -12.25, 11.0
+
+# Per-item ceiling/floor for each Accuracy sub-axis, from judge.py's actual
+# point values (worst case here means "still matched, but scored badly on
+# every field" - not "the model hallucinated infinite extra items", which
+# is unbounded and excluded from this ceiling/floor by design).
+_A1_ITEM_BOUNDS = (7.0, -9.0)
+_A2_ITEM_BOUNDS = (6.0, -7.5)
+_A3_ITEM_BOUNDS = (6.0, -7.0)
+_A3_EPISODE_BOUNDS = (2.0, -4.0)  # abstention_calibration + unnecessary_avoidance, ceiling/floor
+
+
+def _final_grade(process_total: float, accuracy: AccuracyJudgement, no_real_output: bool) -> float | None:
+    """Single 0-100 grade combining Process (30%) and Accuracy (70%). Raw
+    point sums can't be weighted directly - Accuracy's scale (tens to
+    hundreds of points, scaling with how many real findings/diagnoses/
+    actions this visit has) dwarfs Process's fixed small range, so a naive
+    0.3*process + 0.7*accuracy wouldn't actually produce a 30/70 split.
+    Both axes are normalized to [0,1] against their own ceiling/floor
+    first, THEN weighted - so "70% on a 6-action visit" and "70% on a
+    2-action visit" represent the same proportional correctness, not
+    raw-point parity. Ceiling/floor use only non-hallucinated (matched or
+    missed_by_model) item counts - a model can't inflate its own ceiling by
+    hallucinating extra items, since hallucinations only ever cost points."""
+    def _n_real(items) -> int:
+        return sum(1 for i in items if i.match_status != "hallucinated_by_model")
+
+    n_a1 = _n_real(accuracy.findings.items)
+    n_a2 = _n_real(accuracy.impressions.items)
+    a1_ceiling, a1_floor = n_a1 * _A1_ITEM_BOUNDS[0], n_a1 * _A1_ITEM_BOUNDS[1]
+    a2_ceiling, a2_floor = n_a2 * _A2_ITEM_BOUNDS[0], n_a2 * _A2_ITEM_BOUNDS[1]
+    accuracy_ceiling, accuracy_floor = a1_ceiling + a2_ceiling, a1_floor + a2_floor
+
+    if accuracy.follow_up is not None:
+        n_a3 = _n_real(accuracy.follow_up.items)
+        accuracy_ceiling += n_a3 * _A3_ITEM_BOUNDS[0] + _A3_EPISODE_BOUNDS[0]
+        accuracy_floor += n_a3 * _A3_ITEM_BOUNDS[1] + _A3_EPISODE_BOUNDS[1]
+
+    if accuracy_ceiling == accuracy_floor:  # no gold items at all - degenerate case
+        return None
+
+    # A genuine no-show (the model produced no relevant output at all) looks
+    # IDENTICAL, per-item, to "attempted every gold item and missed all of
+    # them" - both are 100% missed_by_model rows. But those are different
+    # failures: missing an item you tried to address costs -2 (cheaper than
+    # a badly-wrong matched item at -9, on purpose - an actively wrong
+    # answer should be penalized harder than silence). Left as-is, that
+    # means total silence normalizes to ~30-40%, not near 0%, since -2/item
+    # sits well above the -9/item floor.
+    #
+    # `no_real_output` is ground truth from the episode log (were
+    # model_findings/model_impressions/model_follow_up_actions actually
+    # empty BEFORE they were ever sent to the judge) rather than inferred
+    # from the judge's own output - a real run surfaced the judge
+    # occasionally hallucinating 1-2 phantom items even given completely
+    # empty input, which would silently defeat detection based on the
+    # judge's own response.
+    process_norm = (process_total - PROCESS_FLOOR) / (PROCESS_CEILING - PROCESS_FLOOR)
+    if no_real_output:
+        accuracy_norm = 0.0
+    else:
+        accuracy_norm = (accuracy.total_score - accuracy_floor) / (accuracy_ceiling - accuracy_floor)
+    # Clamp - hallucinated extras can push the real score below the
+    # "realistic" floor computed above, since that floor only accounts for
+    # gold items scored badly, not unlimited hallucinated ones on top.
+    process_norm = max(0.0, min(1.0, process_norm))
+    accuracy_norm = max(0.0, min(1.0, accuracy_norm))
+
+    return 100.0 * (0.3 * process_norm + 0.7 * accuracy_norm)
+
+
 def grade_episode(episode_dir: Path) -> dict:
     log_path = episode_dir / "log.jsonl"
     ep = _load_episode_summary(log_path)
@@ -174,7 +250,16 @@ def grade_episode(episode_dir: Path) -> dict:
     # tool-call capture for findings/impressions - checks every real note
     # form in the registry, not just SOAP, since the prompt no longer tells
     # it which one to use.
-    saved_notes = read_all_note_forms(patient_id, visit_date)
+    #
+    # episode_start_ts scopes this to notes saved AFTER this specific
+    # episode began - agent_episode.py names each episode dir with its own
+    # start time (f"{patient_id}_{visit_date}_{int(time.time())}"), so it's
+    # already sitting right there in the directory name. Without this, a
+    # rerun against the same patient/visit (exactly what happens re-running
+    # reference tasks) could get graded on a PRIOR episode's leftover saved
+    # note instead of its own - a real bug, found via a real run.
+    episode_start_ts = int(episode_dir.name.rsplit("_", 1)[-1])
+    saved_notes = read_all_note_forms(patient_id, visit_date, after_ts=episode_start_ts)
     model_findings, model_impressions, model_written_followup = ("", "", "")
     if saved_notes:
         model_findings, model_impressions, model_written_followup = _extract_written_note(saved_notes)
@@ -240,43 +325,68 @@ def grade_episode(episode_dir: Path) -> dict:
                 "axis": axis_label, "item": f"[{item.match_status}] {description}",
                 "component": field, "points": value, "note": item.reasoning,
             })
+        # _match_penalty is a computed @property, not a real Pydantic field -
+        # model_dump() above never sees it, so without this it silently
+        # vanishes into the TOTAL row with no line item explaining where a
+        # missed/hallucinated item's points actually came from.
         rows.append({
             "axis": axis_label, "item": f"[{item.match_status}] {description}",
-            "component": "match_status_penalty", "points": item._match_penalty,
-            "note": f"{item.match_status} penalty",
+            "component": "match_status_penalty", "points": round(item._match_penalty, 2), "note": item.reasoning,
         })
         rows.append({
             "axis": axis_label, "item": f"[{item.match_status}] {description}",
             "component": "TOTAL (sum of components above)", "points": round(item.raw_total, 2), "note": item.reasoning,
         })
 
+    def _explode_followup(axis_label: str, fu: FollowupJudgement):
+        for item in fu.items:
+            _explode(axis_label, item, item.action_description)
+        # abstention_calibration and unnecessary_avoidance are episode-level
+        # fields on FollowupJudgement itself, not per-item - the generic
+        # _explode() loop above never sees them since they're outside
+        # fu.items. Give them their own rows so per-checkpoint analysis can
+        # see them individually, matching how every other A3 sub-metric
+        # gets a row.
+        rows.append({"axis": axis_label, "item": "[episode] abstention_calibration",
+                     "component": "abstention_calibration", "points": round(fu.abstention_calibration, 2), "note": ""})
+        rows.append({"axis": axis_label, "item": "[episode] unnecessary_avoidance",
+                     "component": "unnecessary_avoidance", "points": round(fu.unnecessary_avoidance, 2), "note": ""})
+
     for item in accuracy.findings.items:
         _explode("A1 Findings", item, item.finding_description)
     for item in accuracy.impressions.items:
         _explode("A2 Impressions", item, item.diagnosis_description)
     if accuracy.follow_up:
-        for item in accuracy.follow_up.items:
-            _explode("A3 Follow-up (actions)", item, item.action_description)
+        _explode_followup("A3 Follow-up (actions)", accuracy.follow_up)
     if written_followup_judgement:
-        for item in written_followup_judgement.items:
-            _explode("A3 Follow-up (written)", item, item.action_description)
+        _explode_followup("A3 Follow-up (written)", written_followup_judgement)
 
     written_followup_score = (
-        sum(i.raw_total for i in written_followup_judgement.items) / len(written_followup_judgement.items)
-        if written_followup_judgement and written_followup_judgement.items else None
+        sum(i.raw_total for i in written_followup_judgement.items)
+        + written_followup_judgement.abstention_calibration
+        + written_followup_judgement.unnecessary_avoidance
+        if written_followup_judgement else None
     )
 
     z1_total = sum(i.points for i in process_items if i.step.startswith("Z1"))
     z2_total = sum(i.points for i in process_items if i.step.startswith("Z2"))
+    process_total = z1_total + z2_total
+
+    # Ground truth for the no-show case, from what was actually sent to the
+    # judge - not inferred from the judge's own (occasionally noisy) output.
+    no_real_output = not (model_findings.strip() or model_impressions.strip() or model_follow_up_actions.strip())
+    final_grade_pct = _final_grade(process_total, accuracy, no_real_output)
+
     totals = {
         "Z1 (Information-Gathering) total": round(z1_total, 2),
         "Z2 (Action-Execution) total": round(z2_total, 2),
-        "Process total (Z1+Z2)": round(z1_total + z2_total, 2),
+        "Process total (Z1+Z2)": round(process_total, 2),
         "A1 (Findings) total": round(accuracy.a1_score, 2),
         "A2 (Impressions) total": round(accuracy.a2_score, 2),
         "A3 (Follow-up - actions) total": round(accuracy.a3_score, 2) if accuracy.a3_score is not None else "",
         "A3 (Follow-up - written) total": round(written_followup_score, 2) if written_followup_score is not None else "",
         "Accuracy total (A1+A2+A3-actions)": round(accuracy.total_score, 2),
+        "Final Grade (30% Process / 70% Accuracy)": f"{final_grade_pct:.1f}%" if final_grade_pct is not None else "",
     }
     for label, value in totals.items():
         rows.append({"axis": "TOTAL", "item": label, "component": "", "points": value, "note": ""})
@@ -323,7 +433,8 @@ if __name__ == "__main__":
     result = grade_episode(episode_dir)
     for row in result["rows"]:
         comp = f" :: {row['component']}" if row.get("component") else ""
-        print(f"  {row['points']:+.2f}  [{row['axis']}] {row['item']}{comp}")
+        points_display = f"{row['points']:+.2f}" if isinstance(row["points"], (int, float)) else str(row["points"])
+        print(f"  {points_display}  [{row['axis']}] {row['item']}{comp}")
     print()
     for label, value in result["totals"].items():
         print(f"{label}: {value}")
