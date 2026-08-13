@@ -20,6 +20,13 @@ of the old standalone-viewer-first order):
     attached scores +1 regardless, since there's nothing to click into.
   - Z1 steps 6-7 (open X-ray / interact with X-ray): same formname-based
     detection, now the LAST two Z1 steps instead of the first two.
+  - Z1 step 8 (engages prior imaging): same "only if given" carve-out as
+    step 5 - a patient with no prior study on file can't be penalized for
+    not comparing to it. Detected via a URL query param the frontend
+    stamps itself (XrayFullScreenViewer.jsx's stampUrlParam) rather than a
+    formname= pattern, since the prior-studies timeline is a client-side
+    React state change, not a page/form navigation - there's no other way
+    for a post-hoc log scan to see it happened.
   - Z2 steps renumbered sequentially (9-13) per explicit user request - an
     earlier revision left gaps (9, 12, 14, 15, 16) where dropped checks used
     to sit, on purpose, so labels matched exactly what appeared in old
@@ -52,23 +59,25 @@ of the old standalone-viewer-first order):
     uninformative points that scaled with action count.
   - Z2.12 ("too many/too few actions"): compared against THIS VISIT's
     actual gold action count (via oracle.py), not a fixed universal band
-    - real visits have 1-6 gold actions, not always 1-3. Normalized by
-    gold_n like Z2.10, but keeping the original 3x asymmetry between
-    directions: -0.75/gold_n per missing action vs -0.25/gold_n per extra
-    action (missing something required is worse than one harmless extra).
-    Missing every gold action always costs exactly -0.75 regardless of
-    visit size, instead of scaling unboundedly with task size.
+    - real visits have 1-6 gold actions, not always 1-3. Direct, uncapped
+    per-action penalty (no longer normalized by gold_n): -5.0 per missing
+    action (same magnitude as a missed item on the Accuracy axis - a
+    missing gold action is the same underlying failure either way) vs
+    -0.25 per extra action (a harmless additional order is a minor
+    inefficiency, not a missed necessity). Missing 4 of 4 gold actions
+    costs -20.0, not a flat -0.75 - this DOES now scale with task size on
+    purpose (PROCESS_FLOOR in grade_episode.py accounts for this
+    per-episode via gold_n).
   - Z2.11 (abstention calibration): "should abstain" ground truth = gold
     action list is empty OR contains ACT_ABSTAIN/ACT_CLINICAL_CORRELATION.
     Same definition used in judge.py's A3 abstention handling so Process
     and Accuracy don't quietly disagree.
-  - Z1 range [-7.5,7]. Z2 no longer scales unboundedly with action count
-    now that the old valid-action check is gone and Z2.10 is normalized to
-    [-1,+1] - only Z2.12's per-action penalty (-0.25/-0.75) still grows
-    with how far off the action count is, which is intentional: a badly-
-    miscalibrated action count (e.g. Task 4's 6-action case answered with
-    3) should be able to swing the total further negative than a
-    fixed-range check would allow.
+  - Z1 range [-8.5,8] (was [-7.5,7] before step 8 was added). Z2.10 is
+    normalized to [-1,+1] regardless of action count, but Z2.12's
+    per-action penalty (-0.25/-1.0) DOES grow with how far off the action
+    count is, which is intentional: a badly-miscalibrated action count
+    (e.g. Task 4's 6-action case answered with 0) should be able to swing
+    the total further negative than a fixed-range check would allow.
 
 Ground truth patient/encounter comes from a [[verifier.collect]]-dumped
 snapshot of the real DB (queried once, inside the `mysql` service itself,
@@ -265,86 +274,60 @@ def read_all_note_forms(patient_id: str, visit_date: str, after_ts: float | None
     return found
 
 
-_IMPRESSION_SPLIT_RE = re.compile(r"impression\s*:", re.IGNORECASE)
-_FOLLOWUP_SPLIT_RE = re.compile(r"follow-?up\s*:", re.IGNORECASE)
-_FINDINGS_LABEL_RE = re.compile(r"^findings\s*:\s*", re.IGNORECASE)
-
-
-def split_three(text: str) -> tuple[str, str, str]:
-    """Splits one free-text block into (findings, impression, follow_up)
-    using literal 'Findings:'/'Impression:'/'Follow-up:' markers - the
-    format the system prompt explicitly asks the agent to use. Whatever
-    the agent actually labels gets graded; nothing else does - simpler and
-    safer than any length-based heuristic (no risk of a login credential
-    or patient ID slipping in, since those are never typed under one of
-    these labels). Shared by grade_process.py's Process check and
-    grade_episode.py's Accuracy extraction, so both use identical logic."""
-    imp_m = _IMPRESSION_SPLIT_RE.search(text)
-    fu_m = _FOLLOWUP_SPLIT_RE.search(text)
-
-    if imp_m and fu_m and fu_m.start() > imp_m.start():
-        findings = text[:imp_m.start()]
-        impression = text[imp_m.end():fu_m.start()]
-        follow_up = text[fu_m.end():]
-    elif imp_m and not fu_m:
-        findings = text[:imp_m.start()]
-        impression = text[imp_m.end():]
-        follow_up = ""
-    elif fu_m and not imp_m:
-        findings = text[:fu_m.start()]
-        impression = ""
-        follow_up = text[fu_m.end():]
-    elif imp_m and fu_m:  # follow-up marker appears before impression marker - unusual order, still honor both
-        findings = text[:min(imp_m.start(), fu_m.start())]
-        impression = text[imp_m.end():] if imp_m.start() > fu_m.start() else text[imp_m.end():fu_m.start()]
-        follow_up = text[fu_m.end():] if fu_m.start() > imp_m.start() else text[fu_m.end():imp_m.start()]
-    else:
-        findings, impression, follow_up = "", "", ""  # no marker at all - nothing labeled as documentation, grade nothing
-    findings = _FINDINGS_LABEL_RE.sub("", findings.strip())
-    return findings.strip(), impression.strip(), follow_up.strip()
-
-
 def all_typed_text(entries: list[dict]) -> str:
     """Every type_text call's text, concatenated in call order - no length
-    filtering, no exclusion list. Safe because split_three() only grades
-    content that appears after an explicit 'Findings:'/'Impression:'/
-    'Follow-up:' marker - a login credential or patient ID typed into an
-    unrelated field is never labeled that way, so it's never graded,
-    without needing to guess at it via length heuristics."""
+    filtering, no exclusion list. This is a raw utility, not safe to grade
+    directly - see documentation_typed_after_xray() for the guarded
+    version actually used for grading."""
     return "\n\n".join(
         e["args"]["text"] for e in entries
         if e.get("type") == "step" and e.get("tool") == "type_text"
     )
 
 
-def score_documentation_saved(entries: list[dict], saved_notes: dict[str, dict[str, str]]) -> ScoreItem | None:
-    """New check, per explicit user request: if the agent typed real
-    documentation (labeled Findings:/Impression:/Follow-up:) but none of
-    it ended up in any real saved note form, that's a real failure - it
-    believed it documented something and didn't. -0.25 for that; +1 if
-    labeled content was typed AND found saved; None (not scored) if no
-    Findings:/Impression:/Follow-up: label was ever typed at all, since
-    this check is specifically about typed-but-lost content, not about
-    whether documentation was attempted."""
-    findings, impression, follow_up = split_three(all_typed_text(entries))
-    typed_sections = [s for s in (findings, impression, follow_up) if s]
-    if not typed_sections:
+def documentation_typed_after_xray(entries: list[dict], xray_step: int | None) -> str:
+    """The report is now one continuous free-text block (per explicit user
+    decision - no more 'Findings:'/'Impression:'/'Follow-up:' labels), so
+    there's no label to safely filter on anymore. The safety concern
+    labels used to solve - a login credential or patient-search string
+    getting swept into 'documentation' - is instead solved by a step
+    cutoff: nothing typed before the agent actually opened the X-ray
+    Viewer could possibly be a clinical report (login, patient search, and
+    encounter navigation all happen earlier), so only type_text calls at
+    or after xray_step count. Returns "" if the X-ray was never opened -
+    consistent with split_three()'s old "no marker at all, grade nothing"
+    behavior."""
+    if xray_step is None:
+        return ""
+    return "\n\n".join(
+        e["args"]["text"] for e in entries
+        if e.get("type") == "step" and e.get("tool") == "type_text" and e.get("step", 0) >= xray_step
+    )
+
+
+def score_documentation_saved(entries: list[dict], saved_notes: dict[str, dict[str, str]], xray_step: int | None) -> ScoreItem | None:
+    """New check, per explicit user request: if the agent typed a real
+    report (after opening the X-ray) but none of it ended up in any real
+    saved note form, that's a real failure - it believed it documented
+    something and didn't. -0.25 for that; +1 if typed content was found
+    saved; None (not scored) if nothing was typed after opening the X-ray
+    at all, since this check is specifically about typed-but-lost content,
+    not about whether documentation was attempted."""
+    typed = documentation_typed_after_xray(entries, xray_step)
+    if not typed:
         return None
 
     saved_text_blob = " ".join(
         v for field_map in saved_notes.values() for v in field_map.values()
     ).lower()
 
-    def _found(text: str) -> bool:
-        # A real save may have been edited/retyped slightly - require a
-        # solid substring match (first 40 chars) rather than exact equality.
-        needle = text.strip().lower()[:40]
-        return bool(needle) and needle in saved_text_blob
-
-    if any(_found(t) for t in typed_sections):
-        return ScoreItem("Documentation actually saved", 1, "Typed labeled documentation (Findings/Impression/Follow-up) and it was found in a real saved note form.")
+    # A real save may have been edited/retyped slightly - require a solid
+    # substring match (first 40 chars) rather than exact equality.
+    needle = typed.strip().lower()[:40]
+    if needle and needle in saved_text_blob:
+        return ScoreItem("Documentation actually saved", 1, "Typed a report after opening the X-ray and it was found in a real saved note form.")
     return ScoreItem("Documentation actually saved", -0.25,
-                      "Typed labeled documentation (Findings/Impression/Follow-up) but none of it was found in any saved note form - "
+                      "Typed a report after opening the X-ray but none of it was found in any saved note form - "
                       "likely typed into a form and never clicked Save, or navigated away before saving.")
 
 
@@ -468,6 +451,25 @@ def score_z1(entries: list[dict], patient_id: str, visit_date: str) -> tuple[lis
     items.append(ScoreItem("Z1.7 Interacts with X-ray", 1 if interacted else -0.5,
                             "scroll tool call after opening the X-ray." if interacted else "No scroll/zoom after opening the X-ray."))
 
+    # Same "nothing to engage with" carve-out as Z1.5 - a patient with no
+    # prior imaging on file can't be penalized for not comparing to it.
+    # Detected the same way every other Z1 checkpoint is: a pattern in the
+    # logged URLs, not a live query - the frontend stamps
+    # priorStudiesAvailable=0/1 into the URL once it knows, and
+    # viewedPriorStudy=1 if the agent ever clicks a timeline entry (see
+    # XrayFullScreenViewer.jsx's stampUrlParam). If priorStudiesAvailable
+    # never appears at all, the X-ray was never opened far enough to reach
+    # this - already penalized once via Z1.6, not double-counted here.
+    prior_checked = any("priorStudiesAvailable=" in _all_urls(ps) for ps in page_states)
+    prior_available = any("priorStudiesAvailable=1" in _all_urls(ps) for ps in page_states)
+    viewed_prior = any("viewedPriorStudy=1" in _all_urls(ps) for ps in page_states)
+    if not prior_checked or not prior_available:
+        items.append(ScoreItem("Z1.8 Engages prior imaging", 1, "No prior imaging study exists for this patient - not counted against the agent."))
+    elif viewed_prior:
+        items.append(ScoreItem("Z1.8 Engages prior imaging", 1, "Viewed a prior study via the timeline."))
+    else:
+        items.append(ScoreItem("Z1.8 Engages prior imaging", -1, "Prior imaging exists for this patient but was never viewed via the timeline."))
+
     return items, page_states
 
 
@@ -515,21 +517,29 @@ def score_z2_actions(selected_actions: list[dict], gold_action_ids: list[str]) -
         items.append(ScoreItem("Z2.10 No mutual exclusivity conflicts", points,
                                 f"{n - n_conflicted}/{n} action(s) conflict-free."))
 
-    # "Too many/too few" relative to THIS visit's real gold count - normalized
-    # by gold_n like Z2.10, but keeping the original 3x asymmetry: missing a
-    # required action is worse than adding an extra one (real clinical stance
-    # - under-treating is generally worse than one harmless extra), so
-    # missing costs -0.75/gold_n per action vs -0.25/gold_n for extras.
-    # Missing every gold action always costs exactly -0.75 (and selecting
-    # gold_n extras always costs exactly -0.25) regardless of visit size.
+    # "Too many/too few" relative to THIS visit's real gold count - direct,
+    # uncapped per-action penalty (no longer normalized by gold_n). A missing
+    # action is a missed GOLD action - same -5.0 magnitude as a missed item
+    # on the Accuracy axis (judge.py's match_status penalty), since it's the
+    # same underlying failure (a required real action never happened), just
+    # observed from the Process side (EMR order execution) instead of the
+    # Accuracy side (judged output). An extra action costs -0.25 - much
+    # cheaper, since one harmless additional order is a minor inefficiency,
+    # not a missed necessity. Unlike the old normalized version (which
+    # always capped at exactly -0.75/-0.25 regardless of how far off the
+    # count was), this scales with the actual gap - selecting 0 of 4
+    # expected actions now costs -20.0, not a flat -0.75. A conflicting
+    # extra action (contradicts another selected action) is scored
+    # separately by Z2.10's mutual-exclusivity check above; this checkpoint
+    # only counts raw over/under-selection, not conflicts.
     gold_n, model_n = len(gold_action_ids), len(valid_ids)
     if model_n > gold_n:
         extra = model_n - gold_n
-        penalty = round(-0.25 * (extra / gold_n), 3) if gold_n > 0 else -0.25 * extra
+        penalty = round(-0.25 * extra, 3)
         items.append(ScoreItem("Z2.12 Action count calibration", penalty, f"Selected {model_n} actions vs. {gold_n} expected - {extra} too many."))
     elif model_n < gold_n and gold_n > 0:
         missing = gold_n - model_n
-        penalty = round(-0.75 * (missing / gold_n), 3)
+        penalty = round(-5.0 * missing, 3)
         items.append(ScoreItem("Z2.12 Action count calibration", penalty, f"Selected {model_n} actions vs. {gold_n} expected - {missing} too few."))
 
     return items, valid_ids
@@ -587,6 +597,7 @@ def _episode_fully_completed(process_items: list[ScoreItem]) -> bool:
         "Z1.2 Correct patient", "Z1.3 Correct encounter",
         "Z1.4 Engages vitals", "Z1.5 Engages history/office visit",
         "Z1.6 Clicks open X-ray", "Z1.7 Interacts with X-ray",
+        "Z1.8 Engages prior imaging",
         "Z2.9 Navigate to Procedures/Configuration",
     ]
     if not all(_all_positive(s) for s in required_clean):
@@ -639,8 +650,15 @@ def grade_process(log_path: Path, patient_id: str, visit_date: str, gold_action_
     z2_actions, valid_ids = score_z2_actions(selected_actions, gold_action_ids)
     z2_abstain = score_z2_abstention(valid_ids, gold_action_ids)
 
-    saved_notes = read_all_note_forms(patient_id, visit_date)
-    doc_saved_item = score_documentation_saved(entries, saved_notes)
+    xray_step = _reached_form_step(page_states, "xray_viewer")
+    # after_ts scopes the note lookup to THIS episode only - agent_episode.py
+    # names each episode dir with its own start time
+    # (f"{patient_id}_{visit_date}_{int(time.time())}"), so a rerun against
+    # the same patient/visit can never get graded on a prior run's leftover
+    # saved note (see grade_episode.py for the full explanation).
+    episode_start_ts = int(log_path.parent.name.rsplit("_", 1)[-1])
+    saved_notes = read_all_note_forms(patient_id, visit_date, after_ts=episode_start_ts)
+    doc_saved_item = score_documentation_saved(entries, saved_notes, xray_step)
     doc_items = [doc_saved_item] if doc_saved_item else []
 
     all_items = z1_items + [z2_nav] + z2_actions + [z2_abstain] + doc_items

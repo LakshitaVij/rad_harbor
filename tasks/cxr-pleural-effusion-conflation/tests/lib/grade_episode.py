@@ -40,58 +40,27 @@ from pathlib import Path
 # this file in tests/lib/ (flattened from the original two-directory split),
 # so Python's own "script's own directory is on sys.path" behavior resolves
 # these directly - no sys.path manipulation needed.
-from grade_process import grade_process, ScoreItem, read_all_note_forms, split_three, all_typed_text
+from grade_process import grade_process, ScoreItem, read_all_note_forms, documentation_typed_after_xray, _reached_form_step
 from judge import judge, judge_followup, AccuracyJudgement, FollowupJudgement
 from oracle import _GOLD_INDEX, GoldAnswer
 
 FOLLOWUP_CSV = Path(__file__).resolve().parent.parent / "gold" / "generated_followups_fin.csv"
 
-# Per note-form, which real fields best correspond to Findings vs.
-# Impression - used to pick content out of whichever form(s) the agent
-# actually chose (the prompt no longer tells it which one). If more than
-# one form has content, all of it is concatenated per section rather than
-# arbitrarily picking one - real content shouldn't be silently dropped.
-_FINDINGS_FIELDS = {
-    "soap": ["objective"], "clinical_notes": ["description"],
-    "clinic_note": ["history", "examination"], "note": ["message"],
-    "clinical_instructions": ["instruction"],
-}
-_IMPRESSION_FIELDS = {
-    "soap": ["assessment"], "clinical_notes": [], "clinic_note": [], "note": [], "clinical_instructions": [],
-}
-
 
 def _extract_written_note(saved_notes: dict[str, dict[str, str]]) -> tuple[str, str, str]:
-    """Best-effort split of whatever the agent actually wrote across
-    whichever real note form(s) it used into (findings_text,
-    impression_text, written_followup_text). 'soap' cleanly separates
-    assessment (impression) from the rest via its own field - findings and
-    any written follow-up both fall under 'objective' there, so that field
-    is still run through split_three too, to pull out a written follow-up
-    section if the agent included one. Other forms are single free-text
-    fields, split entirely via split_three (grade_process.py) on the
-    'Findings:'/'Impression:'/'Follow-up:' markers the system prompt asks
-    for - nothing gets graded unless the agent actually labeled it."""
-    findings_parts, impression_parts, followup_parts = [], [], []
-    for formdir, fields in saved_notes.items():
-        for field, value in fields.items():
-            if not value.strip():
-                continue
-            if field in _IMPRESSION_FIELDS.get(formdir, []):
-                impression_parts.append(value)
-                continue
-            f, i, fu = split_three(value)
-            if f:
-                findings_parts.append(f)
-            if i:
-                impression_parts.append(i)
-            if fu:
-                followup_parts.append(fu)
-    return (
-        "\n\n".join(p for p in findings_parts if p),
-        "\n\n".join(p for p in impression_parts if p),
-        "\n\n".join(p for p in followup_parts if p),
-    )
+    """The report is one continuous free-text block now (per explicit user
+    decision - no more 'Findings:'/'Impression:'/'Follow-up:' labels, no
+    more per-field SOAP-style splitting). Every non-empty field across
+    whichever real note form(s) the agent used gets concatenated into one
+    text, and that SAME full text is handed to all three judges (A1/A2/A3-
+    written) - a real radiology report doesn't physically separate
+    "findings" from "impression" into different documents either; a reader
+    (or a judge) parses out what's relevant to each from context."""
+    parts = [
+        value for fields in saved_notes.values() for value in fields.values() if value.strip()
+    ]
+    full_text = "\n\n".join(parts)
+    return full_text, full_text, full_text
 
 
 def _study_time_for(patient_id: str, study_date: str) -> str | None:
@@ -158,24 +127,36 @@ def _load_episode_summary(log_path: Path) -> dict:
     }
 
 
-# Process axis bounds are fixed - identical for every episode regardless of
-# task complexity, a direct result of normalizing Z2.10/Z2.12 by action
-# count. Accuracy bounds are NOT fixed - they scale with how many real gold
-# findings/diagnoses/actions this specific visit has, so they're computed
-# per-episode below instead of hardcoded.
-PROCESS_FLOOR, PROCESS_CEILING = -12.25, 11.0
+# Process axis ceiling is fixed - identical for every episode - but the
+# floor is NOT, now that Z2.12's missing-action penalty is direct and
+# uncapped (-5.0 per missing gold action, same magnitude as a missed item
+# on the Accuracy axis) instead of normalized to a flat -0.75. A visit with
+# more gold actions has a further-negative worst case (selecting 0 of 6
+# costs -30.0, not -0.75), so the floor scales with THIS episode's real
+# gold_n, same reasoning as the Accuracy bounds below. _BASE_PROCESS_FLOOR
+# is every other Z1/Z2 checkpoint's worst case (fixed), with Z2.12's own
+# worst case (missing every gold action) added per-episode via
+# _process_floor(). Shifted by +-1 from the prior [-12.25, 11.0] when Z1.8
+# (engages prior imaging) was added - one more +1/-1 checkpoint in the Z1
+# sum.
+_BASE_PROCESS_FLOOR = -12.5
+PROCESS_CEILING = 12.0
+
+
+def _process_floor(gold_n: int) -> float:
+    return _BASE_PROCESS_FLOOR - 5.0 * gold_n
 
 # Per-item ceiling/floor for each Accuracy sub-axis, from judge.py's actual
 # point values (worst case here means "still matched, but scored badly on
 # every field" - not "the model hallucinated infinite extra items", which
 # is unbounded and excluded from this ceiling/floor by design).
-_A1_ITEM_BOUNDS = (7.0, -9.0)
+_A1_ITEM_BOUNDS = (8.0, -10.0)  # was (7.0, -9.0) before comparison_accuracy was added
 _A2_ITEM_BOUNDS = (6.0, -7.5)
 _A3_ITEM_BOUNDS = (6.0, -7.0)
 _A3_EPISODE_BOUNDS = (2.0, -4.0)  # abstention_calibration + unnecessary_avoidance, ceiling/floor
 
 
-def _final_grade(process_total: float, accuracy: AccuracyJudgement, no_real_output: bool) -> float | None:
+def _final_grade(process_total: float, accuracy: AccuracyJudgement, no_real_output: bool, gold_n_actions: int) -> float | None:
     """Single 0-100 grade combining Process (30%) and Accuracy (70%). Raw
     point sums can't be weighted directly - Accuracy's scale (tens to
     hundreds of points, scaling with how many real findings/diagnoses/
@@ -213,14 +194,19 @@ def _final_grade(process_total: float, accuracy: AccuracyJudgement, no_real_outp
     # means total silence normalizes to ~30-40%, not near 0%, since -2/item
     # sits well above the -9/item floor.
     #
-    # `no_real_output` is ground truth from the episode log (were
-    # model_findings/model_impressions/model_follow_up_actions actually
-    # empty BEFORE they were ever sent to the judge) rather than inferred
-    # from the judge's own output - a real run surfaced the judge
-    # occasionally hallucinating 1-2 phantom items even given completely
-    # empty input, which would silently defeat detection based on the
-    # judge's own response.
-    process_norm = (process_total - PROCESS_FLOOR) / (PROCESS_CEILING - PROCESS_FLOOR)
+    # This used to be INFERRED from the judge's own output (zero matched AND
+    # zero hallucinated items across every axis) - but a real run surfaced
+    # the judge occasionally hallucinating 1-2 phantom items even when given
+    # completely empty input, which silently defeated that detection (Task
+    # 5's connection-error episode: truly zero agent output, but the judge
+    # still reported 2 hallucinated_by_model items). Trusting the judge's
+    # interpretation of "was there real output" is trusting a second LLM
+    # call that can itself be wrong. `no_real_output` is ground truth from
+    # the episode log instead - were model_findings/model_impressions/
+    # model_follow_up_actions actually empty BEFORE they were ever sent to
+    # the judge - so this can't be fooled by judge noise.
+    process_floor = _process_floor(gold_n_actions)
+    process_norm = (process_total - process_floor) / (PROCESS_CEILING - process_floor)
     if no_real_output:
         accuracy_norm = 0.0
     else:
@@ -269,16 +255,19 @@ def grade_episode(episode_dir: Path) -> dict:
     # Process still penalizes this (-0.25, "Documentation actually saved"
     # in grade_process.py) - but a correct answer that got lost shouldn't
     # ALSO be graded identically to no answer at all on the Accuracy axis.
-    # split_three() only grades content the agent actually labeled
-    # Findings:/Impression:/Follow-up: - no length heuristics, no risk of
-    # a login credential or patient ID slipping in, since neither is ever
-    # typed under one of those labels. Only falls further back to the old
-    # report_findings/report_impression tool-call capture (empty for any
-    # episode run after those tools were removed) if nothing was labeled
-    # as documentation at all.
+    # documentation_typed_after_xray() only grades text typed AFTER the
+    # agent opened the X-ray Viewer - login/patient-search/encounter-nav
+    # typing all happens earlier, so this can't sweep in a credential or
+    # patient ID the way "every type_text call, unfiltered" would. Only
+    # falls further back to the old report_findings/report_impression
+    # tool-call capture (empty for any episode run after those tools were
+    # removed) if nothing was typed post-X-ray at all.
     if not model_findings and not model_impressions and not model_written_followup:
-        model_findings, model_impressions, model_written_followup = split_three(all_typed_text(ep["entries"]))
-        if not model_findings and not model_impressions and not model_written_followup:
+        page_states = [e for e in ep["entries"] if e.get("type") == "page_state"]
+        xray_step = _reached_form_step(page_states, "xray_viewer")
+        typed = documentation_typed_after_xray(ep["entries"], xray_step)
+        model_findings = model_impressions = model_written_followup = typed
+        if not typed:
             model_findings = _flatten_findings(ep["reported_findings"])
             model_impressions = _flatten_impression(ep["reported_impression"])
 
@@ -375,7 +364,7 @@ def grade_episode(episode_dir: Path) -> dict:
     # Ground truth for the no-show case, from what was actually sent to the
     # judge - not inferred from the judge's own (occasionally noisy) output.
     no_real_output = not (model_findings.strip() or model_impressions.strip() or model_follow_up_actions.strip())
-    final_grade_pct = _final_grade(process_total, accuracy, no_real_output)
+    final_grade_pct = _final_grade(process_total, accuracy, no_real_output, len(gold.gold_action_ids))
 
     totals = {
         "Z1 (Information-Gathering) total": round(z1_total, 2),

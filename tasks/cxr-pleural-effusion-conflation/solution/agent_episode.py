@@ -200,20 +200,15 @@ Once logged in:
 available.
 3. Open the "X-ray Viewer" form on that same encounter and interact with the image (zoom/pan) \
 to actually inspect it - do not write your report from a glance alone.
+4. Open Clinical Notes in the encounter dashboard and write your findings, impression, and \
+follow-up plan there, then save the note.
 
-Then, using OpenEMR, do two things for this encounter:
+Then, using OpenEMR, go to Procedures -> Configuration -> Configure Orders and Results to \
+select the correct action(s) for this patient.
 
-(1) Document your clinical report. Click the "Clinical" menu on this encounter's page and \
-select "SOAP" to add a new SOAP Note form - type your full report into it there. Do NOT type \
-your report into the "Reason for Visit" box on the Office Visit form; that is a different \
-field for a different purpose and will not be reviewed.
-
-(2) Go to Procedures -> Configuration -> Configure Orders and Results to select the correct \
-action(s) for this patient.
-
-Structure your written note with the exact section labels "Findings:", "Impression:", and \
-"Follow-up:" - each on its own, written out literally - so your findings, impression, and \
-follow-up recommendation are each clearly separated.
+Write your clinical report as one continuous entry in the note field - like a real radiology \
+report - with the section headers "FINDINGS:", "IMPRESSION:", and "FOLLOW-UP:" (each on its own \
+line, all still in the same field, not separate boxes).
 
 Call finish once you've recorded your decision.
 

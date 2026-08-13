@@ -133,6 +133,7 @@ class FindingScoreItem(BaseModel):
     location: float = Field(description="+1 precise / +0.5 general region / -1 wrong or hallucination / 0 if not matched.")
     confidence_wording: float = Field(description="+1 match / -0.5 over- or under-confident / -2 hallucination. 0 if not matched.")
     clinical_reasoning: float = Field(description="+1 sound / +0.5 weak / -2 incorrect (includes hallucinated reasoning - not a separate case). 0 if not matched.")
+    comparison_accuracy: float = Field(description="+1 correctly describes change from a prior study (unchanged/improved/worsened/new) when gold's finding is itself comparative / -1 wrong or omitted comparison gold explicitly makes. 0 if gold's finding isn't comparative, or not matched.")
 
     reasoning: str = Field(description="One or two sentences: why this item was scored this way.")
 
@@ -143,19 +144,21 @@ class FindingScoreItem(BaseModel):
         "scoring" something already implied by match_status itself. Derived
         here instead of asked for, removing the risk of an inconsistent
         combination (e.g. match_status="missed_by_model" but a model output
-        of false_negatives=+1). Kept asymmetric (missed worse than
-        hallucinated) for consistency with A2/A3's match_status penalty and
-        Z2.12's action-count calibration - briefly made symmetric (-2/-2),
-        reverted since there's no real reason findings specifically should
-        be the one axis that treats a fabricated item as equally bad as a
-        missed one when every other axis doesn't."""
-        return {"matched": 1.0, "missed_by_model": -2.0, "hallucinated_by_model": -1.0}[self.match_status]
+        of false_negatives=+1). Symmetric -5.0/-5.0: a missed real finding
+        and a fabricated one are treated as equally bad - a clinician has to
+        either notice the omission themselves or actively rule out a
+        hallucinated one, both real safety costs. Raised from -2.0/-1.0 to
+        -5.0/-5.0 per explicit user request, applied uniformly across
+        A1/A2/A3 for consistency (same change in DiagnosisScoreItem and
+        FollowupScoreItem below)."""
+        return {"matched": 1.0, "missed_by_model": -5.0, "hallucinated_by_model": -5.0}[self.match_status]
 
     @property
     def raw_total(self) -> float:
         return (
             self.presence_absence + self.laterality + self.severity + self.location
-            + self.confidence_wording + self.clinical_reasoning + self._match_penalty
+            + self.confidence_wording + self.clinical_reasoning + self.comparison_accuracy
+            + self._match_penalty
         )
 
 
@@ -186,8 +189,9 @@ class DiagnosisScoreItem(BaseModel):
     @property
     def _match_penalty(self) -> float:
         """Same deterministic-from-match_status derivation as
-        FindingScoreItem._match_penalty - see that docstring."""
-        return {"matched": 1.0, "missed_by_model": -2.0, "hallucinated_by_model": -1.0}[self.match_status]
+        FindingScoreItem._match_penalty - see that docstring (symmetric
+        -5.0/-5.0)."""
+        return {"matched": 1.0, "missed_by_model": -5.0, "hallucinated_by_model": -5.0}[self.match_status]
 
     @property
     def raw_total(self) -> float:
@@ -226,8 +230,9 @@ class FollowupScoreItem(BaseModel):
         """Replaces the old essential_action_recall/secondary_capture fields
         - both were just match_status restated (a primary/secondary split of
         the same "caught/missed/hallucinated" fact, same redundancy pattern
-        as A1/A2's false_negatives/positives and diagnosis_match merge)."""
-        return {"matched": 1.0, "missed_by_model": -2.0, "hallucinated_by_model": -1.0}[self.match_status]
+        as A1/A2's false_negatives/positives and diagnosis_match merge).
+        Symmetric -5.0/-5.0, same as A1/A2 - see FindingScoreItem._match_penalty."""
+        return {"matched": 1.0, "missed_by_model": -5.0, "hallucinated_by_model": -5.0}[self.match_status]
 
     @property
     def raw_total(self) -> float:
@@ -290,12 +295,20 @@ against a clinician-approved gold-standard FINDINGS section for the SAME image. 
 re-reading the image yourself - only comparing two descriptions for clinical equivalence.
 
 For each finding in gold, output ONE item: "matched" if the model reported an equivalent \
-finding (score presence_absence/laterality/severity/location/confidence_wording/clinical_reasoning \
-per the field descriptions), or "missed_by_model" if the model never addressed it (all other \
-fields=0 - match_status alone captures that it was missed).
+finding (score presence_absence/laterality/severity/location/confidence_wording/ \
+clinical_reasoning/comparison_accuracy per the field descriptions), or "missed_by_model" if the \
+model never addressed it (all other fields=0 - match_status alone captures that it was missed).
 
 For each model finding with NO equivalent in gold, output one "hallucinated_by_model" item \
 (all other fields=0 - match_status alone captures that it was hallucinated).
+
+COMPARISON_ACCURACY: some gold findings are inherently comparative - they describe change (or \
+lack of it) relative to a prior study (e.g. "unchanged left lower lobe nodule," "increased \
+right mediastinal mass," "new since prior"). When gold's finding is comparative, score whether \
+the model's finding correctly captures that same direction of change (+1), gets it wrong or \
+omits the comparison entirely (-1). If gold's finding is NOT comparative (a one-time \
+observation with nothing to compare against), score 0 - this only applies when gold itself \
+makes a comparison.
 
 Include pertinent negatives (e.g. "no pneumothorax") as findings if either side states them. \
 Grade on CLINICAL MEANING, not wording - different phrasing of the same finding should score \
