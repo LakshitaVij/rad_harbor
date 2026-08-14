@@ -98,7 +98,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import openpyxl
@@ -258,7 +258,17 @@ def read_all_note_forms(patient_id: str, visit_date: str, after_ts: float | None
             date_str, *values = row.split("\t")
             if after_ts is not None:
                 try:
-                    row_ts = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").timestamp()
+                    # MySQL's NOW() (used by every form's save.php) reflects
+                    # the mysql container's own system time zone, confirmed
+                    # UTC (@@system_time_zone). .timestamp() on a naive
+                    # datetime assumes it's already in whatever time zone
+                    # THIS process is running in - wrong whenever that
+                    # differs from the DB's, silently shifting row_ts by
+                    # the offset and mis-scoping notes to the wrong episode.
+                    # Mark it UTC explicitly so the comparison is correct
+                    # regardless of what time zone this process runs in -
+                    # found via a real run graded from a non-UTC host.
+                    row_ts = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
                 except ValueError:
                     continue
                 if row_ts < after_ts:
