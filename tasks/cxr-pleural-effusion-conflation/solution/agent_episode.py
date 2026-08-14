@@ -57,7 +57,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENEMR_BASE = os.environ.get("OPENEMR_BASE", "https://localhost:9300")
 OPENEMR_USER = "admin"
 OPENEMR_PASS = "pass"
-MODEL = "google/gemini-3.1-pro-preview"  # newest multimodal Gemini Pro on OpenRouter (resolved from the ~google/gemini-pro-latest alias)
+MODEL = os.environ.get("SUBJECT_MODEL", "google/gemini-3.1-pro-preview")  # override via SUBJECT_MODEL env var; defaults to the Gemini Pro this task was calibrated against
 MAX_STEPS_DEFAULT = 120
 # Was 30, then 50 - still cutting episodes short before they reached
 # documentation/action-selection. Not fully uncapped: a genuinely stuck

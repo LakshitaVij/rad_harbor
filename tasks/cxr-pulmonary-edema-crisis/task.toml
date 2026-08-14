@@ -81,6 +81,7 @@ timeout_sec = 1800.0
 
 [agent.env]
 OPENROUTER_API_KEY = "${OPENROUTER_API_KEY}"
+SUBJECT_MODEL = "${SUBJECT_MODEL}"
 
 [environment]
 network_mode = "public"
