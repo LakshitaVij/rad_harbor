@@ -552,7 +552,15 @@ def score_z2_abstention(valid_ids: list[str], gold_action_ids: list[str]) -> Sco
     if not gold_says_abstain and model_abstained:
         return ScoreItem("Z2.11 Abstention calibration", -2, "Gold expected real action(s), agent abstained instead.")
     if gold_says_abstain and not model_abstained:
-        return ScoreItem("Z2.11 Abstention calibration", 0.25, "Gold expected abstention, agent acted anyway.")
+        # Was +0.25 - positive credit for the wrong move (acting when gold
+        # expected abstention). judge.py's equivalent case
+        # (abstention_calibration, "gold expected abstention but the model
+        # still recommended something") scores this -0.5; Process and
+        # Accuracy shouldn't disagree on which direction this behavior
+        # points. This branch is unreachable against the 4 shipped golds
+        # (none currently expects abstention) but was a live sign bug -
+        # found in grader QA.
+        return ScoreItem("Z2.11 Abstention calibration", -0.5, "Gold expected abstention, agent acted anyway.")
     return ScoreItem("Z2.11 Abstention calibration", 1, "Gold expected real action(s), agent acted.")
 
 
