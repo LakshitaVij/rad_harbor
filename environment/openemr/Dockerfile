@@ -1,4 +1,6 @@
-FROM openemr/openemr:flex
+FROM openemr/openemr:8.3.0
+
+RUN apk add --no-cache patch
 
 WORKDIR /var/www/localhost/htdocs/openemr
 
