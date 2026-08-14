@@ -70,7 +70,7 @@ run_section "FORM_EXISTS:newpatient" \
   "SELECT COUNT(*) FROM forms f JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"newpatient\" AND f.deleted=0;"
 
 run_section "ACTIONS_SELECTED" \
-  "SELECT DISTINCT fasi.action_id FROM forms f JOIN form_action_selection_items fasi ON fasi.form_action_selection_id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"action_selection\" AND f.deleted=0 ORDER BY fasi.action_id;"
+  "SELECT DISTINCT f.date, fasi.action_id FROM forms f JOIN form_action_selection_items fasi ON fasi.form_action_selection_id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"action_selection\" AND f.deleted=0 ORDER BY fasi.action_id;"
 
 run_section "NOTE_FORM:soap" \
   "SELECT f.date, s.subjective, s.objective, s.assessment, s.plan FROM forms f JOIN form_soap s ON s.id=f.form_id JOIN patient_data pd ON pd.pid=f.pid JOIN form_encounter fe ON fe.pid=f.pid AND fe.encounter=f.encounter WHERE pd.lname=\"$PATIENT_ID\" AND DATE(fe.date)=\"$VISIT_DATE\" AND f.formdir=\"soap\" ORDER BY f.id DESC LIMIT 5;"

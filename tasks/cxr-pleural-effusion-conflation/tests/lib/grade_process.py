@@ -205,12 +205,33 @@ def ground_truth_pid_encounter(patient_id: str, visit_date: str) -> tuple[int | 
     return int(pid), int(encounter)
 
 
-def ground_truth_selected_action_ids(patient_id: str, visit_date: str) -> list[str]:
+def ground_truth_selected_action_ids(patient_id: str, visit_date: str, after_ts: float | None = None) -> list[str]:
     """Real action_id(s) actually saved on this visit's Follow-up Action
     Selection form (real form_action_selection_items rows, resolved by the
     [[verifier.collect]] hook's ACTIONS_SELECTED query) - not anything the
-    agent merely reported. Params kept for call-site compatibility."""
-    return _section_data_lines("ACTIONS_SELECTED")
+    agent merely reported. Params kept for call-site compatibility.
+
+    after_ts scopes this to actions saved AFTER that time - the same
+    reused-patient/encounter problem read_all_note_forms() solves: without
+    it, a later episode that never even opened this form could still get
+    credited (or blamed) for an earlier episode's leftover selection,
+    since `forms` rows persist across runs. Found via a real run where
+    Z2.9 correctly showed "never reached the form" but Z2.10/Z2.11 still
+    saw 2 real action_ids anyway - stale rows from an earlier episode
+    against the same patient/encounter."""
+    lines = _section_data_lines("ACTIONS_SELECTED")
+    action_ids = []
+    for row in lines:
+        date_str, action_id = row.split("\t")
+        if after_ts is not None:
+            try:
+                row_ts = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+            except ValueError:
+                continue
+            if row_ts < after_ts:
+                continue
+        action_ids.append(action_id)
+    return sorted(set(action_ids))
 
 
 # Real OpenEMR note-type forms an agent might legitimately choose to
@@ -722,18 +743,20 @@ def grade_process(log_path: Path, patient_id: str, visit_date: str, gold_action_
     entries = load_episode_log(log_path)
     z1_items, page_states = score_z1(entries, patient_id, visit_date)
 
+    # Scopes both the action-selection and note lookups to THIS episode
+    # only - agent_episode.py names each episode dir with its own start
+    # time (f"{patient_id}_{visit_date}_{int(time.time())}"), so a rerun
+    # against the same patient/visit can never get graded on a prior run's
+    # leftover selection/note (see grade_episode.py for the full
+    # explanation).
+    episode_start_ts = int(log_path.parent.name.rsplit("_", 1)[-1])
+
     z2_nav = score_z2_navigation(page_states)
-    real_action_ids = ground_truth_selected_action_ids(patient_id, visit_date)
+    real_action_ids = ground_truth_selected_action_ids(patient_id, visit_date, after_ts=episode_start_ts)
     z2_actions, valid_ids = score_z2_actions(real_action_ids)
     z2_abstain = score_z2_abstention(valid_ids, gold_action_ids)
 
     xray_step = _reached_form_step(page_states, "xray_viewer")
-    # after_ts scopes the note lookup to THIS episode only - agent_episode.py
-    # names each episode dir with its own start time
-    # (f"{patient_id}_{visit_date}_{int(time.time())}"), so a rerun against
-    # the same patient/visit can never get graded on a prior run's leftover
-    # saved note (see grade_episode.py for the full explanation).
-    episode_start_ts = int(log_path.parent.name.rsplit("_", 1)[-1])
     saved_notes = read_all_note_forms(patient_id, visit_date, after_ts=episode_start_ts)
     doc_saved_item = score_documentation_saved(entries, saved_notes, xray_step)
     doc_items = [doc_saved_item] if doc_saved_item else []

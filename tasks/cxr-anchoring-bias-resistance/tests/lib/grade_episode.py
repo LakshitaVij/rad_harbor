@@ -323,7 +323,7 @@ def grade_episode(episode_dir: Path) -> dict:
     #     These two scores are NOT combined into one - kept as separate
     #     axes so a mismatch between what was saved and what was written
     #     stays visible rather than averaged away.
-    real_selected_action_ids = ground_truth_selected_action_ids(patient_id, visit_date)
+    real_selected_action_ids = ground_truth_selected_action_ids(patient_id, visit_date, after_ts=episode_start_ts)
     model_follow_up_actions = "\n".join(f"- {_action_label(a)}" for a in real_selected_action_ids) or "(no actions selected)"
 
     accuracy: AccuracyJudgement = judge(
