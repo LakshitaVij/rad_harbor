@@ -1,0 +1,49 @@
+{
+  "index.html": {
+    "file": "assets/index-Cf14t-ZP.js",
+    "name": "index",
+    "src": "index.html",
+    "isEntry": true,
+    "dynamicImports": [
+      "node_modules/@cornerstonejs/dicom-image-loader/dist/esm/codecs/jpeg.js",
+      "node_modules/jpeg-lossless-decoder-js/release/lossless.js"
+    ],
+    "css": [
+      "assets/index-D7jt8uPK.css"
+    ],
+    "assets": [
+      "assets/libjpegturbowasm_decode-daqMmuVl.wasm",
+      "assets/charlswasm_decode-484ovEoR.wasm",
+      "assets/openjpegwasm_decode-B3gWTHpv.wasm",
+      "assets/openjphjs-C-BUUy4a.wasm"
+    ]
+  },
+  "node_modules/@cornerstonejs/codec-charls/dist/charlswasm_decode.wasm": {
+    "file": "assets/charlswasm_decode-484ovEoR.wasm",
+    "src": "node_modules/@cornerstonejs/codec-charls/dist/charlswasm_decode.wasm"
+  },
+  "node_modules/@cornerstonejs/codec-libjpeg-turbo-8bit/dist/libjpegturbowasm_decode.wasm": {
+    "file": "assets/libjpegturbowasm_decode-daqMmuVl.wasm",
+    "src": "node_modules/@cornerstonejs/codec-libjpeg-turbo-8bit/dist/libjpegturbowasm_decode.wasm"
+  },
+  "node_modules/@cornerstonejs/codec-openjpeg/dist/openjpegwasm_decode.wasm": {
+    "file": "assets/openjpegwasm_decode-B3gWTHpv.wasm",
+    "src": "node_modules/@cornerstonejs/codec-openjpeg/dist/openjpegwasm_decode.wasm"
+  },
+  "node_modules/@cornerstonejs/codec-openjph/dist/openjphjs.wasm": {
+    "file": "assets/openjphjs-C-BUUy4a.wasm",
+    "src": "node_modules/@cornerstonejs/codec-openjph/dist/openjphjs.wasm"
+  },
+  "node_modules/@cornerstonejs/dicom-image-loader/dist/esm/codecs/jpeg.js": {
+    "file": "assets/jpeg-CbZPf-U9.js",
+    "name": "jpeg",
+    "src": "node_modules/@cornerstonejs/dicom-image-loader/dist/esm/codecs/jpeg.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/jpeg-lossless-decoder-js/release/lossless.js": {
+    "file": "assets/lossless-CJTiRK6R.js",
+    "name": "lossless",
+    "src": "node_modules/jpeg-lossless-decoder-js/release/lossless.js",
+    "isDynamicEntry": true
+  }
+}

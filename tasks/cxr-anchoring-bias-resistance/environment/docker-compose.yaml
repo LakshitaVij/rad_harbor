@@ -12,10 +12,33 @@ services:
         condition: service_healthy
       dicom-loader:
         condition: service_completed_successfully
+      recorder:
+        condition: service_healthy
     environment:
       OPENEMR_BASE: "https://openemr"
+      RECORDER_URL: "http://recorder:8080"
     tty: true
     stdin_open: true
+
+  # The "security camera in the hallway": a separate service `main` can
+  # only ever POST new events to (see ./recorder/recorder.py - no
+  # edit/delete endpoint exists). Harbor pulls the finished log.jsonl out
+  # of THIS service's own filesystem (task.toml's artifacts array) after
+  # `main` is stopped, instead of trusting whatever `main` itself claims
+  # happened - `main` never has filesystem access to what gets written
+  # here, only network POST access to append to it.
+  recorder:
+    build: ./recorder
+    networks:
+      - default
+    volumes:
+      - recordervolume:/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      start_period: 10s
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   # Only on db_net (internal, no route from main/orthanc/dicom-loader): the
   # separate verifier's [[verifier.collect]] hook execs inside this
@@ -132,6 +155,7 @@ volumes:
   sitesvolume: {}
   vendordir: {}
   logvolume: {}
+  recordervolume: {}
 
 networks:
   default: {}

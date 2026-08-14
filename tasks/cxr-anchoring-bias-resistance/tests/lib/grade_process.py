@@ -125,13 +125,9 @@ _NEW_ACTIONS_META = {
 ABSTAIN_ACTION_IDS = {"ACT_ABSTAIN", "ACT_CLINICAL_CORRELATION"}
 
 
-def _humanize(action_id: str) -> str:
-    return " ".join(w.capitalize() for w in action_id.replace("ACT_", "").split("_"))
-
-
 def _load_action_catalog() -> dict[str, dict]:
-    """action_id -> {name, can_combine, group}, for matching select_action's
-    human-readable level_2 labels back to the real catalog."""
+    """action_id -> {name, can_combine, group}, for Z2.10's mutual-
+    exclusivity group lookup."""
     catalog = {}
     if ACTION_LIBRARY_XLSX.exists():
         wb = openpyxl.load_workbook(ACTION_LIBRARY_XLSX, data_only=True)
@@ -152,21 +148,6 @@ def _load_action_catalog() -> dict[str, dict]:
 
 
 _CATALOG = _load_action_catalog()
-_NAME_TO_ID = {meta["name"].strip().lower(): action_id for action_id, meta in _CATALOG.items()}
-_NAME_TO_ID.update({_humanize(action_id).strip().lower(): action_id for action_id in _CATALOG})
-
-
-def _match_action_id(level_2_label: str) -> str | None:
-    """Map select_action's on-screen label back to a real action_id - exact
-    match first, falling back to a normalized/loose match since the agent
-    may not reproduce the label byte-for-byte."""
-    label = (level_2_label or "").strip().lower()
-    if label in _NAME_TO_ID:
-        return _NAME_TO_ID[label]
-    for name, action_id in _NAME_TO_ID.items():
-        if name in label or label in name:
-            return action_id
-    return None
 
 
 _ground_truth_sections_cache: dict[str, list[str]] | None = None
@@ -222,6 +203,14 @@ def ground_truth_pid_encounter(patient_id: str, visit_date: str) -> tuple[int | 
         return None, None
     pid, encounter = lines[0].split("\t")
     return int(pid), int(encounter)
+
+
+def ground_truth_selected_action_ids(patient_id: str, visit_date: str) -> list[str]:
+    """Real action_id(s) actually saved on this visit's Follow-up Action
+    Selection form (real form_action_selection_items rows, resolved by the
+    [[verifier.collect]] hook's ACTIONS_SELECTED query) - not anything the
+    agent merely reported. Params kept for call-site compatibility."""
+    return _section_data_lines("ACTIONS_SELECTED")
 
 
 # Real OpenEMR note-type forms an agent might legitimately choose to
@@ -319,7 +308,14 @@ def score_documentation_saved(entries: list[dict], saved_notes: dict[str, dict[s
     something and didn't. -0.25 for that; +1 if typed content was found
     saved; None (not scored) if nothing was typed after opening the X-ray
     at all, since this check is specifically about typed-but-lost content,
-    not about whether documentation was attempted."""
+    not about whether documentation was attempted.
+
+    Named "Z2.14..." (not just "Documentation actually saved") so it's
+    captured by grade_episode.py's z2_total = sum(...if i.step.startswith
+    ("Z2")) - without the prefix this checkpoint's points were computed
+    and shown in the receipt but silently never added to process_total,
+    even though PROCESS_FLOOR/CEILING's own math assumed they were -
+    found in grader QA."""
     typed = documentation_typed_after_xray(entries, xray_step)
     if not typed:
         return None
@@ -329,11 +325,15 @@ def score_documentation_saved(entries: list[dict], saved_notes: dict[str, dict[s
     ).lower()
 
     # A real save may have been edited/retyped slightly - require a solid
-    # substring match (first 40 chars) rather than exact equality.
-    needle = typed.strip().lower()[:40]
+    # substring match (first 150 chars) rather than exact equality. Was 40 -
+    # short enough that generic clinical-note phrasing (e.g. a common
+    # "Clinical Indication:" opening) could plausibly recur elsewhere in
+    # the saved blob by coincidence, not genuine correspondence. 150 chars
+    # is long enough to be case-specific - found in grader QA.
+    needle = typed.strip().lower()[:150]
     if needle and needle in saved_text_blob:
-        return ScoreItem("Documentation actually saved", 1, "Typed a report after opening the X-ray and it was found in a real saved note form.")
-    return ScoreItem("Documentation actually saved", -0.25,
+        return ScoreItem("Z2.14 Documentation actually saved", 1, "Typed a report after opening the X-ray and it was found in a real saved note form.")
+    return ScoreItem("Z2.14 Documentation actually saved", -0.25,
                       "Typed a report after opening the X-ray but none of it was found in any saved note form - "
                       "likely typed into a form and never clicked Save, or navigated away before saving.")
 
@@ -382,6 +382,19 @@ def _reached_form_step(page_states: list[dict], formname: str) -> int | None:
     return None
 
 
+def _left_form_step(page_states: list[dict], formname: str, after_step: int) -> int | None:
+    """First step after after_step whose page_state no longer shows
+    formname=<formname> in any URL - i.e. when the agent navigated away
+    from that form. Returns None if the form's URL is still showing as of
+    the last logged page_state (the agent never left)."""
+    pattern = re.compile(rf"formname={formname}\b")
+    for ps in page_states:
+        step = ps.get("step")
+        if step is not None and step > after_step and not pattern.search(_all_urls(ps)):
+            return step
+    return None
+
+
 def score_z1(entries: list[dict], patient_id: str, visit_date: str) -> tuple[list[ScoreItem], list[dict]]:
     """New embedded-app step order: the agent starts inside OpenEMR (no
     separate X-ray app to switch into), so information-gathering now goes
@@ -393,8 +406,13 @@ def score_z1(entries: list[dict], patient_id: str, visit_date: str) -> tuple[lis
 
     items = []
 
-    typed_texts = [e["args"].get("text", "").lower() for e in steps if e.get("tool") == "type_text"]
-    logged_in = any("admin" in t for t in typed_texts) and any("pass" in t for t in typed_texts)
+    # Exact match, not substring - "administer furosemide" or "did not
+    # pass" typed into a clinical note later in the episode must not
+    # satisfy this. The real login form is filled with two separate
+    # type_text calls, each containing only the credential itself, so
+    # exact match loses nothing real while closing that hole.
+    typed_texts = [e["args"].get("text", "").strip().lower() for e in steps if e.get("tool") == "type_text"]
+    logged_in = any(t == "admin" for t in typed_texts) and any(t == "pass" for t in typed_texts)
     items.append(ScoreItem("Z1.1 Logs in", 1 if logged_in else -1,
                             "Typed both username and password." if logged_in else "Login credentials not both entered."))
 
@@ -422,13 +440,25 @@ def score_z1(entries: list[dict], patient_id: str, visit_date: str) -> tuple[lis
     else:
         items.append(ScoreItem("Z1.3 Correct encounter", -1, "Never reached the correct encounter page."))
 
+    # xray_step computed early - used both as Z1.6's own check below and as
+    # the upper bound on "further action" for Z1.4/Z1.5 (see
+    # _engagement_item): per the fixed workflow order (login -> patient ->
+    # encounter -> vitals -> history -> X-ray), anything the agent does
+    # AFTER opening the X-ray is no longer evidence of engaging with vitals
+    # or history specifically - found in grader QA (the old unbounded
+    # "any later step in the whole episode" check could be satisfied by
+    # steps taken tens of actions later, e.g. during documentation).
+    xray_step = _reached_form_step(page_states, "xray_viewer")
+
     # Z1.4/Z1.5: "clicked + scrolled/read" - clicked into the real form
     # (formname=vitals / formname=newpatient in the URL, per
     # _reached_form_step) AND took at least one further action there
-    # before moving on, same "did something after arriving" proxy the old
-    # shared vitals/history check used - "scrolled/read" isn't a distinct
-    # tool call the way X-ray zoom/pan is, so genuine reading can't be
-    # detected more precisely than "didn't immediately navigate away."
+    # before moving on to the X-ray, same "did something after arriving"
+    # proxy the old shared vitals/history check used - "scrolled/read"
+    # isn't a distinct tool call the way X-ray zoom/pan is, so genuine
+    # reading can't be detected more precisely than "didn't immediately
+    # navigate away." Bounded to before xray_step (not unbounded to the
+    # end of the episode - see comment above).
     def _engagement_item(step_name: str, formname: str, required: bool) -> ScoreItem:
         reached_step = _reached_form_step(page_states, formname)
         if reached_step is None:
@@ -437,7 +467,10 @@ def score_z1(entries: list[dict], patient_id: str, visit_date: str) -> tuple[lis
             # "only if given" - this encounter has no such form attached at
             # all, so the agent had nothing to click into; don't penalize.
             return ScoreItem(step_name, 1, f"No {formname} form exists for this encounter - not counted against the agent.")
-        took_further_action = any(e.get("type") == "step" and e.get("step", 0) > reached_step for e in entries)
+        upper_bound = xray_step if xray_step is not None else float("inf")
+        took_further_action = any(
+            e.get("type") == "step" and reached_step < e.get("step", 0) < upper_bound for e in entries
+        )
         if took_further_action:
             return ScoreItem(step_name, 1, f"Opened the {formname} form and took further action there.")
         return ScoreItem(step_name, -1, f"Opened the {formname} form but showed no further engagement.")
@@ -447,12 +480,21 @@ def score_z1(entries: list[dict], patient_id: str, visit_date: str) -> tuple[lis
     office_visit_exists = _form_exists(true_pid, true_encounter, "newpatient")
     items.append(_engagement_item("Z1.5 Engages history/office visit", "newpatient", required=office_visit_exists))
 
-    xray_step = _reached_form_step(page_states, "xray_viewer")
     items.append(ScoreItem("Z1.6 Clicks open X-ray", 1 if xray_step is not None else -2,
                             "Opened the X-ray Viewer form." if xray_step is not None else "Never opened the X-ray Viewer form."))
 
+    # Z1.7: bounded to scroll calls made while still on the X-ray viewer
+    # (before xray_left_step) - scroll is a shared tool also used to
+    # scroll long pages like the Follow-up Action Selection form's 55
+    # checkboxes, so an unbounded "any scroll after xray_step" could be
+    # satisfied by a scroll call made much later on that unrelated form -
+    # found in grader QA. Real X-ray review plausibly involves multiple
+    # zoom/pan actions while staying on the viewer, so this costs nothing
+    # for genuinely correct behavior.
+    xray_left_step = _left_form_step(page_states, "xray_viewer", xray_step) if xray_step is not None else None
+    xray_upper_bound = xray_left_step if xray_left_step is not None else float("inf")
     interacted = xray_step is not None and any(
-        e.get("type") == "step" and e.get("tool") == "scroll" and e.get("step", 0) > xray_step
+        e.get("type") == "step" and e.get("tool") == "scroll" and xray_step < e.get("step", 0) < xray_upper_bound
         for e in entries
     )
     items.append(ScoreItem("Z1.7 Interacts with X-ray", 1 if interacted else -0.5,
@@ -481,28 +523,29 @@ def score_z1(entries: list[dict], patient_id: str, visit_date: str) -> tuple[lis
 
 
 def score_z2_navigation(page_states: list[dict]) -> ScoreItem:
-    """'Navigate to Procedures' and 'Navigate to Configuration' collapse into
-    one check, not two - reaching types.php - since the intermediate
-    Procedures menu click isn't a separate page we can detect, and scoring
-    the same single boolean as two rows silently double-weighted it in the
-    Z2 sum (formerly Z2.9 + Z2.10, +1/-1 each)."""
-    reached = any("types.php" in _all_urls(ps) for ps in page_states)
+    """Reaching the real Follow-up Action Selection form - same
+    formname=<formdir> URL detection _reached_form_step already uses for
+    vitals/xray_viewer, not a new mechanism. (Formerly checked for
+    types.php/Configure Orders and Results, before that screen was
+    replaced by the real encounter-scoped form - see grade_episode.py's
+    module docstring.)"""
+    reached = _reached_form_step(page_states, "action_selection") is not None
     return ScoreItem(
-        "Z2.9 Navigate to Procedures/Configuration", 1 if reached else -1,
-        "Reached Configure Orders and Results." if reached else "Never reached Configure Orders and Results.",
+        "Z2.9 Navigate to Follow-up Action Selection", 1 if reached else -1,
+        "Reached the Follow-up Action Selection form." if reached else "Never reached the Follow-up Action Selection form.",
     )
 
 
-def score_z2_actions(selected_actions: list[dict]) -> list[ScoreItem]:
+def score_z2_actions(real_action_ids: list[str]) -> list[ScoreItem]:
     """No longer scores catalog-validity itself (formerly Z2.11, +1/-1 per
     selected action) - an agent hallucinating a nonexistent action is an
     Accuracy-axis concern (A3's hallucinated_by_model), not a Process one.
-    Matching against the catalog still has to happen internally, though -
-    Z2.10 and the action-count check below both need to know which
-    selections are real actions."""
+    real_action_ids comes from ground_truth_selected_action_ids() - real
+    procedure_type.procedure_code values read back from the database, so
+    (unlike the old free-text level_2 label) every entry is already a
+    valid catalog id - no fuzzy matching needed."""
     items = []
-    valid_ids = [_match_action_id(sa.get("level_2", "")) for sa in selected_actions]
-    valid_ids = [a for a in valid_ids if a is not None]
+    valid_ids = list(real_action_ids)
 
     # Z2.10: mutual exclusivity - one non-scaling check, not scored per pair
     # (per-pair scoring made this combinatorial: C(n,2) pairs meant a
@@ -570,15 +613,16 @@ STEP_EFFICIENCY_FIXED_OVERHEAD = 15
 # find/reach the correct patient + 1 find/reach the correct encounter + 1
 # engage vitals +
 # 1 engage history + 1 navigate to a note form + 1 type documentation +
-# 1 click Save + 1 navigate to Procedures + 1 navigate to Configuration/
-# Configure Orders and Results + 1 finish = 15. Interaction with the X-ray
-# is treated as a required step, not optional - per explicit user
-# decision, since a real clinical read requires actually inspecting the
-# image, not just glancing at the default view. This is a transparent,
-# fixed floor - not a claim about the exact optimal click path (that
-# depends on OpenEMR's UI in ways not verifiable from the log alone) -
-# plus one select_action call per gold action for this visit (minimum 1,
-# even for an abstention decision).
+# 1 click Save + 1 open "Add Form: Follow-up Action Selection" + 1 click
+# Save on that form + 1 finish = 15. Interaction with the X-ray is treated
+# as a required step, not optional - per explicit user decision, since a
+# real clinical read requires actually inspecting the image, not just
+# glancing at the default view. This is a transparent, fixed floor - not a
+# claim about the exact optimal click path (that depends on OpenEMR's UI
+# in ways not verifiable from the log alone) - plus one checkbox click per
+# gold action for this visit (minimum 1, even for an abstention decision).
+# (Formerly "navigate to Procedures + navigate to Configuration", before
+# Configure Orders and Results was replaced by the real form.)
 
 STEP_EFFICIENCY_INTERACTION_BUFFER = 2
 # Extra allowance on top of the 1 required interaction step, since a real
@@ -608,7 +652,7 @@ def _episode_fully_completed(process_items: list[ScoreItem], action_count_matche
         "Z1.4 Engages vitals", "Z1.5 Engages history/office visit",
         "Z1.6 Clicks open X-ray", "Z1.7 Interacts with X-ray",
         "Z1.8 Engages prior imaging",
-        "Z2.9 Navigate to Procedures/Configuration",
+        "Z2.9 Navigate to Follow-up Action Selection",
     ]
     if not all(_all_positive(s) for s in required_clean):
         return False
@@ -616,7 +660,7 @@ def _episode_fully_completed(process_items: list[ScoreItem], action_count_matche
         return False
     if not action_count_matches:
         return False
-    doc_points = by_step.get("Documentation actually saved", [])
+    doc_points = by_step.get("Z2.14 Documentation actually saved", [])
     if not doc_points or doc_points[0] != 1:
         return False
     return True
@@ -628,21 +672,25 @@ def score_step_efficiency(entries: list[dict], process_items: list[ScoreItem], g
     steps. Full +1 credit only if the episode both (a) completed the
     entire required workflow with no skipped/failed checkpoint (per
     _episode_fully_completed) and (b) took no more than the minimum step
-    count. -0.25 per step beyond the minimum applies regardless of
-    completion - unnecessary steps are penalized either way."""
+    count.
+
+    Step-count penalty, per explicit user request: a flat -2.0 once the
+    episode goes more than 5 steps over the minimum, 0 within that 5-step
+    grace window - not a gradual per-step scale. This ScoreItem's step
+    name ("Z2.13...") starts with "Z2", so it's included in grade_episode.py's
+    z2_total/process_total sum via the normal Z2 aggregation - the penalty
+    genuinely docks points from the Process axis, not just from this
+    function's own return value.
+    """
     actual_steps = len([e for e in entries if e.get("type") == "step"])
     min_actions = max(1, len(gold_action_ids))
     minimum_steps = STEP_EFFICIENCY_FIXED_OVERHEAD + STEP_EFFICIENCY_INTERACTION_BUFFER + min_actions
     extra_steps = max(0, actual_steps - minimum_steps)
-    # Capped at -2.0 (8 extra steps) - uncapped, this was the only
-    # unbounded component in the whole Process axis: with
-    # MAX_STEPS_DEFAULT=120 and a ~18-step minimum, a slow-but-otherwise-
-    # correct episode could accumulate roughly -25 from step count alone,
-    # more than every other Process checkpoint combined, forcing
-    # process_norm to clamp at 0 regardless of how well everything else
-    # scored. The cap is what makes a fixed, real PROCESS_FLOOR possible
-    # (see grade_episode.py) - found in grader QA.
-    penalty = max(-2.0, round(-0.25 * extra_steps, 2))
+    # Flat -2.0 beyond a 5-step grace window (was a linear -0.25/extra-step
+    # scale, capped at -2.0 after 8 extra steps) - per explicit user
+    # request, replacing gradual scaling with a blanket penalty once the
+    # episode is meaningfully inefficient.
+    penalty = 0.0 if extra_steps <= 5 else -2.0
 
     action_count_matches = len(valid_ids) == len(gold_action_ids)
     fully_completed = _episode_fully_completed(process_items, action_count_matches)
@@ -665,8 +713,8 @@ def grade_process(log_path: Path, patient_id: str, visit_date: str, gold_action_
     z1_items, page_states = score_z1(entries, patient_id, visit_date)
 
     z2_nav = score_z2_navigation(page_states)
-    selected_actions = [e for e in entries if e.get("type") == "select_action"]
-    z2_actions, valid_ids = score_z2_actions(selected_actions)
+    real_action_ids = ground_truth_selected_action_ids(patient_id, visit_date)
+    z2_actions, valid_ids = score_z2_actions(real_action_ids)
     z2_abstain = score_z2_abstention(valid_ids, gold_action_ids)
 
     xray_step = _reached_form_step(page_states, "xray_viewer")

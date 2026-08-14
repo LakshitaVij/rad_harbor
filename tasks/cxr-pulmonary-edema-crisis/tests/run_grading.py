@@ -1,9 +1,12 @@
 """
 run_grading.py
 
-Verifier entrypoint: finds the episode agent_episode.py just wrote under
-/solution/episodes/, runs the full grade_episode() pipeline (Process axis
-via grade_process.py + Accuracy axis via judge.py) against it, and writes
+Verifier entrypoint: finds the episode written under
+/logs/artifacts/recorder_episodes/ - pulled from the `recorder` service,
+NOT from /solution/episodes (which comes from `main`, the agent's own
+container, and is kept around only for human debugging - screenshots
+live there). Runs the full grade_episode() pipeline (Process axis via
+grade_process.py + Accuracy axis via judge.py) against it, and writes
 Harbor's reward file plus a copy of the human-readable receipt into
 /logs/verifier/.
 """
@@ -17,16 +20,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
 from grade_episode import grade_episode  # noqa: E402
 
-EPISODES_DIR = Path("/solution/episodes")
+# recorder.py only ever appends events under a POST - `main` (the agent)
+# has network access to add new events there, never filesystem access to
+# edit or delete ones already written. This is what actually makes
+# log.jsonl trustworthy - not the prefix-matching below, which is just a
+# secondary sanity check.
+EPISODES_DIR = Path("/logs/artifacts/recorder_episodes")
 LOGS_DIR = Path("/logs/verifier")
 
 # Matches solution/solve.sh's hardcoded --patient-id/--visit-date for this
 # task - agent_episode.py always names its episode dir
 # "<patient_id>_<visit_date>_<timestamp>". Grading only trusts an episode
 # dir whose name actually starts with this prefix, instead of blindly
-# picking whichever dir under /solution/episodes/ (an agent-writable
-# directory) happens to have the newest mtime - the latter would let a
-# fabricated log.jsonl win just by being written last.
+# picking whichever dir under EPISODES_DIR happens to have the newest
+# mtime.
 PATIENT_ID = "GRDN00BKCEOKC7S1"
 VISIT_DATE = "2025-07-23"
 
@@ -73,7 +80,14 @@ def main() -> None:
     for label, value in totals.items():
         print(f"{label}: {value}")
 
+    # totals only has the '%'-formatted string version of the Final Grade
+    # (isinstance filter below drops it), so pull the real number straight
+    # from result instead - the actual bug this fixes: reward.json used to
+    # get no "reward" key at all on a successful grading run, only on the
+    # failure paths above (which explicitly write {"reward": 0.0}).
     reward_payload = {k: v for k, v in totals.items() if isinstance(v, (int, float))}
+    if result.get("final_grade_pct") is not None:
+        reward_payload["reward"] = result["final_grade_pct"]
     (LOGS_DIR / "reward.json").write_text(json.dumps(reward_payload, indent=2))
 
     shutil.copy(result["csv_path"], LOGS_DIR / "receipt.csv")

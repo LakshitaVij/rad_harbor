@@ -1,25 +1,20 @@
 """
 agent_episode.py
 
-Runs one computer-use evaluation episode: Gemini Pro (via OpenRouter,
-OpenAI-compatible API) drives a real browser (via Playwright) through the
-actual task - look at a real chest X-ray, navigate into the real OpenEMR
-instance for that patient's visit, read the real clinical context/history,
-and select the action(s) it believes are correct from our real action
-hierarchy (Procedures -> Configuration -> Configure Orders and Results).
+Runs one computer-use evaluation episode: An agent drives a real browser (via Playwright) through the
+actual task of looking at a real chest X-ray, navigating into the real OpenEMR
+instance for that patient's visit, reading the real clinical context/history,
+and selecting the action(s) it believes are correct via the real, encounter-
+scoped "Follow-up Action Selection" form.
 
-This is a literal computer-use loop: screenshot -> model decides one tool
-call -> executed via Playwright -> repeat. Custom small toolset
-(click/type/key/scroll), not the full OS-level "computer" tool, since only
-browser control is needed.
+This is a  computer-use loop: screenshot -> model decides one tool
+call -> executed via Playwright -> repeat. 
 
-Every step is logged to episodes/<patient>_<visit>/log.jsonl - this is the
-log of record for the whole episode, including which patient/visit each
-action was for and which hierarchy node(s) got selected. Necessary because
-OpenEMR's "Configure Orders and Results" screen (where selection actually
-happens - see plan doc for why the real per-patient Procedure Order screen
-doesn't work) has no patient/encounter concept at all, so nothing about
-"the agent picked X for this visit" can be read back out of OpenEMR itself.
+Every step is logged to episodes/<patient>_<visit>/log.jsonl. The agent now selects
+actions by really clicking checkboxes on the real form and saving, which
+writes real rows to OpenEMR's own database (form_action_selection /
+form_action_selection_items), and that's what grading reads back, via the
+task's verifier.collect hook, not anything the agent merely reports.
 
 Harbor packaging note: OPENEMR_BASE and OPENROUTER_API_KEY are overridable
 via env vars (OPENEMR_BASE, OPENROUTER_API_KEY) so this same script runs
@@ -34,6 +29,7 @@ import base64
 import json
 import os
 import time
+import urllib.request
 from pathlib import Path
 
 from openai import OpenAI
@@ -57,6 +53,13 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENEMR_BASE = os.environ.get("OPENEMR_BASE", "https://localhost:9300")
 OPENEMR_USER = "admin"
 OPENEMR_PASS = "pass"
+# Unset for local/manual runs (log_step() then only writes locally, same
+# as before this existed). Set inside the packaged task (docker-compose's
+# `main` service) to the recorder service's URL - see
+# environment/recorder/recorder.py for what actually makes this log
+# trustworthy: `main` can only POST new events there, never edit or
+# delete ones already written.
+RECORDER_URL = os.environ.get("RECORDER_URL")
 MODEL = os.environ.get("SUBJECT_MODEL", "google/gemini-3.1-pro-preview")  # override via SUBJECT_MODEL env var; defaults to the Gemini Pro this task was calibrated against
 MAX_STEPS_DEFAULT = 120
 # Was 30, then 50 - still cutting episodes short before they reached
@@ -134,9 +137,11 @@ TOOLS = [
         "function": {
             "name": "scroll",
             "description": (
-                "Scroll/zoom the page. Use this to actually interact with "
-                "the X-ray image (zoom in/out, pan) as well as to scroll "
-                "long pages like Configure Orders and Results."
+                "Scroll/zoom the page. Zooms the X-ray image in/out (this "
+                "always works, regardless of which X-ray Viewer toolbar mode "
+                "is selected) and scrolls long pages like the Follow-up "
+                "Action Selection form. Does NOT pan the X-ray - use the "
+                "drag tool (middle button) for that."
             ),
             "parameters": {
                 "type": "object",
@@ -151,25 +156,26 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "select_action",
+            "name": "drag",
             "description": (
-                "Record your final clinical decision for this visit. Call "
-                "this AFTER you have navigated to Configure Orders and "
-                "Results and identified the correct action(s) to select "
-                "for this specific patient's visit. This is the log of "
-                "record for grading, separate from any on-screen click - "
-                "use the EXACT text labels as they appear on screen. You "
-                "may call this more than once if multiple actions apply."
+                "Click-and-drag from one point to another (press, move, release). "
+                "Needed for the X-ray Viewer's Pan mode - panning is always a "
+                "middle-button drag, regardless of which toolbar mode is "
+                "selected, and does nothing on a plain click. Also needed for "
+                "its Zoom/Measure toolbar modes (left-button drag, only active "
+                "once that mode is selected via a click on its toolbar button "
+                "first)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "level_1": {"type": "string", "description": "Exact Level-1 category label, e.g. 'Order CT Chest'."},
-                    "level_2": {"type": "string", "description": "Exact Level-2 action label, e.g. 'Obtain CT chest'."},
-                    "level_3": {"type": "string", "description": "Exact Level-3 option label if one applies, else empty string."},
-                    "reasoning": {"type": "string", "description": "Why this action is correct given the X-ray and clinical context."},
+                    "x1": {"type": "integer", "description": "Start x, 0-1000."},
+                    "y1": {"type": "integer", "description": "Start y, 0-1000."},
+                    "x2": {"type": "integer", "description": "End x, 0-1000."},
+                    "y2": {"type": "integer", "description": "End y, 0-1000."},
+                    "button": {"type": "string", "enum": ["left", "middle"], "description": "'middle' to pan the X-ray, 'left' for the Zoom/Measure toolbar modes."},
                 },
-                "required": ["level_1", "level_2", "level_3", "reasoning"],
+                "required": ["x1", "y1", "x2", "y2", "button"],
             },
         },
     },
@@ -177,7 +183,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "finish",
-            "description": "Call this when the episode is complete - all correct action(s) have been recorded via select_action.",
+            "description": "Call this when the episode is complete - all clinically appropriate action(s) have been selected and saved on the Follow-up Action Selection form.",
             "parameters": {
                 "type": "object",
                 "properties": {"notes": {"type": "string"}},
@@ -204,16 +210,18 @@ To do this, take the following steps in OpenEMR:
 available - this is your clinical context.
 3. Open the "X-ray Viewer" form on that same encounter and carefully inspect the current image \
 using the available viewer tools, including zoom/pan when helpful. Do not rely only on the \
-initial full-image view.
+initial full-image view. Use scroll to zoom (works regardless of the selected toolbar mode) and \
+the drag tool with button="middle" to pan - a plain click on the "Pan" toolbar button does \
+nothing by itself, panning always requires a middle-button drag on the image.
 4. In the X-ray Viewer, check the prior-studies timeline. If a relevant prior study exists, \
 review it for comparison; if none exists, note that directly in your report.
 5. Identify and prioritize all clinically important primary and secondary findings, including \
 devices, pertinent negatives, and any change from the prior study.
-6. Open Clinical Notes in the encounter dashboard and document your report there using the \
-exact section labels below, then save the note.
-7. Go to Procedures -> Configuration -> Configure Orders and Results and select any clinically \
-appropriate action(s) for this patient. If no additional action is warranted, do not select an \
-unsupported action.
+6. From the "Clinical" dropdown menu at the top of the encounter's Summary page, open "Clinical \
+Notes" and document your report there using the exact section labels below, then save the note.
+7. From the same "Clinical" dropdown menu, open "Follow-up Action Selection", check any \
+clinically appropriate action(s) for this patient, and save the form. If no additional action is \
+warranted, do not check an unsupported action.
 
 Document your report as one continuous entry in the note field, with each section label on its \
 own line:
@@ -248,8 +256,8 @@ saved for the correct patient and encounter.
 
 Call finish only after the workflow is complete and verified.
 
-click(x, y) uses coordinates normalized 0-1000 (a fraction of the current screenshot's \
-width/height), not raw pixels.
+click(x, y) and drag(x1, y1, x2, y2) use coordinates normalized 0-1000 (a fraction of the \
+current screenshot's width/height), not raw pixels.
 
 Take one tool action per turn.
 """
@@ -258,6 +266,26 @@ Take one tool action per turn.
 def log_step(log_path: Path, entry: dict) -> None:
     with log_path.open("a") as f:
         f.write(json.dumps(entry) + "\n")
+    # The write above is for local/human convenience only (screenshots
+    # live next to it, useful for debugging a real run) - it is NOT what
+    # grading reads once RECORDER_URL is set. This container has no
+    # access to what the recorder actually stores once it's written -
+    # that copy is the trusted one.
+    if RECORDER_URL:
+        _post_to_recorder(log_path.parent.name, entry)
+
+
+def _post_to_recorder(episode_name: str, entry: dict) -> None:
+    try:
+        req = urllib.request.Request(
+            f"{RECORDER_URL}/episodes/{episode_name}/events",
+            data=json.dumps(entry).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:  # noqa: BLE001 - a logging failure shouldn't crash the episode itself
+        print(f"WARNING: failed to POST log entry to recorder: {e}")
 
 
 def screenshot_b64(page) -> str:
@@ -282,17 +310,21 @@ def run_episode(patient_id: str, visit_date: str, max_steps: int, headless: bool
     )
     log_step(log_path, {"type": "episode_start", "patient_id": patient_id, "visit_date": visit_date, "pid": pid})
 
-    selected_actions = []
-
     with sync_playwright() as p:
-        # --window-size matches VIEWPORT so the on-screen window (headed
-        # mode only - purely cosmetic for a human watching) isn't larger
-        # than the actual rendered content, which otherwise leaves blank
-        # space around it. Doesn't affect headless runs or what the agent
-        # itself sees/screenshots, which is always exactly VIEWPORT.
+        # Window chrome size (headed mode only, purely cosmetic for a human
+        # watching) is capped separately from VIEWPORT - a 1600-wide window
+        # doesn't fit macOS's LOGICAL screen resolution on a Retina display
+        # (e.g. a 3024-physical-pixel display is ~1512 logical px at 2x
+        # scaling), which was forcing an oversized/malformed window. The
+        # page still renders at the full VIEWPORT internally (what the
+        # agent screenshots and all click-coordinate math is based on) -
+        # only the on-screen chrome shrinks, Chromium adds scrollbars for
+        # the cosmetic view if needed. Doesn't affect headless runs.
+        cosmetic_width = min(VIEWPORT["width"], 1280)
+        cosmetic_height = min(VIEWPORT["height"], 800)
         browser = p.chromium.launch(
             headless=headless,
-            args=[f"--window-size={VIEWPORT['width']},{VIEWPORT['height']}"] if not headless else [],
+            args=[f"--window-size={cosmetic_width},{cosmetic_height}", "--window-position=0,0"] if not headless else [],
         )
         context = browser.new_context(viewport=VIEWPORT, ignore_https_errors=True)
         page = context.new_page()
@@ -446,9 +478,20 @@ def run_episode(patient_id: str, visit_date: str, max_steps: int, headless: bool
                         page.keyboard.press(args["key"])
                     elif name == "scroll":
                         page.mouse.wheel(args.get("dx", 0), args.get("dy", 0))
-                    elif name == "select_action":
-                        selected_actions.append(args)
-                        log_step(log_path, {"type": "select_action", "step": step, **args})
+                    elif name == "drag":
+                        real_x1 = args["x1"] / 1000 * VIEWPORT["width"]
+                        real_y1 = args["y1"] / 1000 * VIEWPORT["height"]
+                        real_x2 = args["x2"] / 1000 * VIEWPORT["width"]
+                        real_y2 = args["y2"] / 1000 * VIEWPORT["height"]
+                        button = args.get("button", "left")
+                        page.mouse.move(real_x1, real_y1)
+                        page.mouse.down(button=button)
+                        # Multiple intermediate steps, not one jump straight
+                        # to the endpoint - Cornerstone's drag tools (Pan/
+                        # Zoom/Measure) compute their delta from a series of
+                        # mousemove events, not just down+up positions.
+                        page.mouse.move(real_x2, real_y2, steps=10)
+                        page.mouse.up(button=button)
                     elif name == "finish":
                         log_step(log_path, {"type": "episode_end", "step": step, "notes": args.get("notes", "")})
                         tool_result = "finished"
@@ -514,12 +557,8 @@ def run_episode(patient_id: str, visit_date: str, max_steps: int, headless: bool
 
         browser.close()
 
-    log_step(log_path, {
-        "type": "episode_summary",
-        "selected_actions": selected_actions,
-    })
+    log_step(log_path, {"type": "episode_summary"})
     print(f"Episode complete. Log: {log_path}")
-    print(f"Selected actions: {json.dumps(selected_actions, indent=2)}")
     return episode_dir
 
 

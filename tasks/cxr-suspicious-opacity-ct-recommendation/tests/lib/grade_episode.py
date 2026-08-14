@@ -21,10 +21,10 @@ together in one place instead of hunting through each episode's own
 folder. The per-episode receipt still gets written too - this is
 additive, not a replacement.
 
-This is the "marriage" point: A3 follow-up scoring runs against the
-agent's real select_action tool calls (real clicks in Configure Orders
-and Results), matched against oracle.py's gold_action_ids for the same
-visit - not free text.
+This is the "marriage" point: A3 follow-up scoring runs against the real
+action_id(s) saved on the Follow-up Action Selection form (read back from
+OpenEMR's own database via the verifier.collect hook), matched against
+oracle.py's gold_action_ids for the same visit - not self-reported text.
 
 Usage:
     python grade_episode.py episodes/<patient>_<visit>_<timestamp>/
@@ -40,8 +40,8 @@ from pathlib import Path
 # this file in tests/lib/ (flattened from the original two-directory split),
 # so Python's own "script's own directory is on sys.path" behavior resolves
 # these directly - no sys.path manipulation needed.
-from grade_process import grade_process, ScoreItem, read_all_note_forms, documentation_typed_after_xray, _reached_form_step
-from judge import judge, judge_followup, AccuracyJudgement, FollowupJudgement
+from grade_process import grade_process, ScoreItem, read_all_note_forms, documentation_typed_after_xray, _reached_form_step, ground_truth_selected_action_ids
+from judge import judge, judge_followup, AccuracyJudgement, FollowupJudgement, _action_label
 from oracle import _GOLD_INDEX, GoldAnswer
 
 FOLLOWUP_CSV = Path(__file__).resolve().parent.parent / "gold" / "generated_followups_fin.csv"
@@ -139,14 +139,6 @@ def _flatten_impression(diagnoses: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _flatten_actions(selected_actions: list[dict]) -> str:
-    lines = []
-    for a in selected_actions:
-        path = " -> ".join(x for x in [a.get("level_1"), a.get("level_2"), a.get("level_3")] if x)
-        lines.append(f"- {path}: {a.get('reasoning', '')}")
-    return "\n".join(lines)
-
-
 def _load_episode_summary(log_path: Path) -> dict:
     with log_path.open() as f:
         entries = [json.loads(line) for line in f if line.strip()]
@@ -159,7 +151,6 @@ def _load_episode_summary(log_path: Path) -> dict:
         "visit_date": start.get("visit_date"),
         "reported_findings": summary.get("reported_findings", []),
         "reported_impression": summary.get("reported_impression", []),
-        "selected_actions": summary.get("selected_actions", []),
         "entries": entries,
     }
 
@@ -317,15 +308,19 @@ def grade_episode(episode_dir: Path) -> dict:
             model_impressions = _flatten_impression(ep["reported_impression"])
 
     # A3 is graded TWICE, independently, per explicit user decision:
-    # (1) "A3 Follow-up (actions)" - the original "marriage" point, tied to
-    #     the agent's real select_action clicks, unchanged. Can't be faked
-    #     by writing about a follow-up without actually clicking it.
+    # (1) "A3 Follow-up (actions)" - the real "marriage" point: action_id(s)
+    #     actually saved on the Follow-up Action Selection form, read back
+    #     from OpenEMR's own database via the verifier.collect hook. Can't
+    #     be faked by writing about a follow-up without actually saving it -
+    #     unlike the old select_action tool, there is no code path that
+    #     produces this data without a real save.php POST.
     # (2) "A3 Follow-up (written)" - the agent's actual written Follow-up
     #     note text (if any), graded against the same gold independently.
     #     These two scores are NOT combined into one - kept as separate
-    #     axes so a mismatch between what was clicked and what was written
+    #     axes so a mismatch between what was saved and what was written
     #     stays visible rather than averaged away.
-    model_follow_up_actions = _flatten_actions(ep["selected_actions"])
+    real_selected_action_ids = ground_truth_selected_action_ids(patient_id, visit_date)
+    model_follow_up_actions = "\n".join(f"- {_action_label(a)}" for a in real_selected_action_ids) or "(no actions selected)"
 
     accuracy: AccuracyJudgement = judge(
         model_findings=model_findings,
@@ -437,7 +432,7 @@ def grade_episode(episode_dir: Path) -> dict:
 
     _append_to_combined_store(patient_id, visit_date, episode_dir.name, rows)
 
-    return {"rows": rows, "totals": totals, "csv_path": csv_path, "json_path": json_path}
+    return {"rows": rows, "totals": totals, "csv_path": csv_path, "json_path": json_path, "final_grade_pct": final_grade_pct}
 
 
 ALL_RECEIPTS_CSV = Path(__file__).resolve().parent / "all_receipts.csv"
@@ -463,6 +458,19 @@ def _append_to_combined_store(patient_id: str, visit_date: str, episode_dir_name
 
 
 if __name__ == "__main__":
+    # Trust boundary, documented not fixed here: everything in log.jsonl
+    # (Z1/Z2 step timing, URLs, typed text) is taken on faith as coming
+    # from a real Harbor-launched episode against a real agent container -
+    # this file has no way to verify that itself. What CAN'T be forged
+    # this way is A3's action selection and the note-content axes (A1/A2),
+    # since those are cross-checked against real database rows via the
+    # verifier.collect hook, not read from this file - see
+    # ground_truth_selected_action_ids()/read_all_note_forms() in
+    # grade_process.py. A genuine fix for the log itself would need a
+    # guarantee from Harbor's own container/artifact boundary, not
+    # anything achievable from inside this grading script - flagged in
+    # grader QA, deliberately left as a known limitation rather than
+    # papered over.
     episode_dir = Path(sys.argv[1])
     result = grade_episode(episode_dir)
     for row in result["rows"]:

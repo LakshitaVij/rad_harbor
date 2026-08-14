@@ -8,3 +8,5 @@ all_receipts.csv
 all_receipts.jsonl
 receipt.csv
 receipt.json
+.openrouter_key
+docker-compose.override.yaml

@@ -12,3 +12,15 @@ RUN patch -p1 < xray_viewer_form.patch \
 
 COPY sqlconf.php sites/default/sqlconf.php
 RUN chown apache:apache sites/default/sqlconf.php && chmod 400 sites/default/sqlconf.php
+
+COPY action_selection/ interface/forms/action_selection/
+RUN chown -R apache:apache interface/forms/action_selection/
+
+# xray_viewer_form.patch adds interface/forms/xray_viewer/public/index.php,
+# which serves this SPA - it reads its manifest from a `dist/` directory
+# relative to ITS OWN location (public/dist/, not xray_viewer/dist/ - found
+# the hard way, via a live 500 on a real run). Pre-built dist/ copied in
+# directly (matches xray-viewer-frontend/'s own real build output) rather
+# than adding a node/npm build stage for one static bundle.
+COPY xray_viewer_dist/ interface/forms/xray_viewer/public/dist/
+RUN chown -R apache:apache interface/forms/xray_viewer/public/dist/
