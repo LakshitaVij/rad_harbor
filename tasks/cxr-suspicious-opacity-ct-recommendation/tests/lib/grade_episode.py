@@ -190,6 +190,18 @@ _A2_ITEM_BOUNDS = (6.0, -7.5)
 _A3_ITEM_BOUNDS = (6.0, -7.0)
 _A3_EPISODE_BOUNDS = (2.0, -4.0)  # abstention_calibration + unnecessary_avoidance, ceiling/floor
 
+# Fixed, judge-independent gold item counts for THIS task - hand-counted
+# directly from tests/gold/consolidated_real_reports.csv (findings/
+# impressions) and generated_followups_fin.csv (actions), not derived from
+# any judge call. The previous approach (_n_real() counting whatever the
+# live judge happened to segment gold into this run) meant the same model
+# output could score differently across repeated grading runs purely from
+# judge segmentation noise (the judge is documented elsewhere in this file
+# as occasionally inventing phantom items even on empty input) - moving/
+# merging one gold item shifts the ceiling/floor, not just the score.
+# Found in grader QA.
+_GOLD_ITEM_COUNTS = {"a1": 4, "a2": 1, "a3": 3}
+
 
 def _final_grade(process_total: float, accuracy: AccuracyJudgement, no_real_output: bool) -> float | None:
     """Single 0-100 grade combining Process (30%) and Accuracy (70%). Raw
@@ -200,20 +212,18 @@ def _final_grade(process_total: float, accuracy: AccuracyJudgement, no_real_outp
     Both axes are normalized to [0,1] against their own ceiling/floor
     first, THEN weighted - so "70% on a 6-action visit" and "70% on a
     2-action visit" represent the same proportional correctness, not
-    raw-point parity. Ceiling/floor use only non-hallucinated (matched or
-    missed_by_model) item counts - a model can't inflate its own ceiling by
-    hallucinating extra items, since hallucinations only ever cost points."""
-    def _n_real(items) -> int:
-        return sum(1 for i in items if i.match_status != "hallucinated_by_model")
-
-    n_a1 = _n_real(accuracy.findings.items)
-    n_a2 = _n_real(accuracy.impressions.items)
+    raw-point parity. Ceiling/floor use fixed gold-side item counts
+    (_GOLD_ITEM_COUNTS), not the judge's own per-run segmentation - a model
+    can't inflate its own ceiling by hallucinating extra items either way,
+    since hallucinations only ever cost points and were never counted here."""
+    n_a1 = _GOLD_ITEM_COUNTS["a1"]
+    n_a2 = _GOLD_ITEM_COUNTS["a2"]
     a1_ceiling, a1_floor = n_a1 * _A1_ITEM_BOUNDS[0], n_a1 * _A1_ITEM_BOUNDS[1]
     a2_ceiling, a2_floor = n_a2 * _A2_ITEM_BOUNDS[0], n_a2 * _A2_ITEM_BOUNDS[1]
     accuracy_ceiling, accuracy_floor = a1_ceiling + a2_ceiling, a1_floor + a2_floor
 
     if accuracy.follow_up is not None:
-        n_a3 = _n_real(accuracy.follow_up.items)
+        n_a3 = _GOLD_ITEM_COUNTS["a3"]
         accuracy_ceiling += n_a3 * _A3_ITEM_BOUNDS[0] + _A3_EPISODE_BOUNDS[0]
         accuracy_floor += n_a3 * _A3_ITEM_BOUNDS[1] + _A3_EPISODE_BOUNDS[1]
 
