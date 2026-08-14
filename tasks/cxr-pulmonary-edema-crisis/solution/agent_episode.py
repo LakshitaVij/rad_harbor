@@ -317,14 +317,18 @@ def run_episode(patient_id: str, visit_date: str, max_steps: int, headless: bool
         # (e.g. a 3024-physical-pixel display is ~1512 logical px at 2x
         # scaling), which was forcing an oversized/malformed window. The
         # page still renders at the full VIEWPORT internally (what the
-        # agent screenshots and all click-coordinate math is based on) -
-        # only the on-screen chrome shrinks, Chromium adds scrollbars for
-        # the cosmetic view if needed. Doesn't affect headless runs.
-        cosmetic_width = min(VIEWPORT["width"], 1280)
-        cosmetic_height = min(VIEWPORT["height"], 800)
+        # agent screenshots and all click-coordinate math is based on).
+        # --window-size alone doesn't work: Playwright resizes the OS
+        # window to match new_context(viewport=...) once the context is
+        # created, silently overriding that flag - confirmed live (window
+        # stayed oversized despite the flag). --force-device-scale-factor
+        # shrinks only the on-screen rendering; CDP screenshots and the
+        # coordinate space Playwright reports are unaffected by display
+        # scale, so this doesn't touch VIEWPORT-based math at all. Doesn't
+        # affect headless runs.
         browser = p.chromium.launch(
             headless=headless,
-            args=[f"--window-size={cosmetic_width},{cosmetic_height}", "--window-position=0,0"] if not headless else [],
+            args=["--force-device-scale-factor=0.8"] if not headless else [],
         )
         context = browser.new_context(viewport=VIEWPORT, ignore_https_errors=True)
         page = context.new_page()
@@ -341,6 +345,14 @@ def run_episode(patient_id: str, visit_date: str, max_steps: int, headless: bool
         log_step(log_path, {"type": "setup", "note": "starting at OpenEMR login page - agent logs in and navigates itself"})
 
         messages = [{"role": "system", "content": system_prompt}]
+        # OpenEMR keeps the X-ray Viewer's iframe loaded in the background
+        # even after the agent switches to a different tab (Clinical Notes,
+        # etc.) - it still shows up in page.frames. Without this, the
+        # 45s-timeout wait below re-ran on EVERY subsequent step for the
+        # rest of the episode once the images failed to load once, wasting
+        # up to 45s/step long after the agent had moved on - found live in
+        # a real run. Wait at most once per distinct frame instance.
+        xray_frames_checked: set[int] = set()
 
         for step in range(1, max_steps + 1):
             # X-ray Viewer is an iframe that may or may not be open at any
@@ -349,7 +361,8 @@ def run_episode(patient_id: str, visit_date: str, max_steps: int, headless: bool
             # IMAGE_RENDERED-derived flag before screenshotting, so the
             # agent isn't handed a screenshot of a still-loading viewport.
             xray_frame = next((f for f in page.frames if "xray_viewer/public/index.php" in f.url), None)
-            if xray_frame is not None:
+            if xray_frame is not None and id(xray_frame) not in xray_frames_checked:
+                xray_frames_checked.add(id(xray_frame))
                 try:
                     # 15s was too short in practice - confirmed via a real
                     # run that data-xray-loaded=true DOES get set correctly
