@@ -46,6 +46,43 @@ from oracle import _GOLD_INDEX, GoldAnswer
 
 FOLLOWUP_CSV = Path(__file__).resolve().parent.parent / "gold" / "generated_followups_fin.csv"
 
+# Some gold action lists consist entirely of conservative "keep monitoring,
+# no acute intervention" actions - clinically indistinguishable from
+# abstaining outright. cxr-anchoring-bias-resistance's gold is exactly
+# [ACT_STOP_SURVEILLANCE, ACT_OBSERVE] with a recommendation reading "No
+# acute chest imaging follow-up is indicated. Continue routine clinical
+# observation..." - a genuinely correct "nothing acute needed" response
+# was being scored as -2 (Z2.11 abstention calibration, "abstained when
+# gold expected real action(s)") plus two -5 A3 misses, ~-12 points, for
+# what's arguably the right clinical call. Not a mutual-exclusivity
+# concern (Z2.10 already handles conflicting actions) - this is about the
+# ABSTENTION-CALIBRATION framing specifically treating a 2-action gold as
+# "real work required" when the actions themselves represent doing
+# nothing acute.
+#
+# Deliberately scoped here, not added to grade_process.py's shared
+# ABSTAIN_ACTION_IDS - these two IDs could legitimately appear alongside
+# genuinely different real actions in some other task's gold, and
+# ABSTAIN_ACTION_IDS is checked with an "any of these present" test, which
+# would misfire on a mixed selection (e.g. [ACT_OBSERVE, ACT_RAPID_RESPONSE]
+# would wrongly register as "abstained" if ACT_OBSERVE were in that set).
+# Verified today neither ID appears in any other task's gold, but scoping
+# the transform to just this orchestration layer means the shared grader
+# logic in grade_process.py/judge.py never has to know about this special
+# case at all - zero risk to the other 3 tasks even if that ever changes.
+_MONITORING_ONLY_IDS = {"ACT_STOP_SURVEILLANCE", "ACT_OBSERVE"}
+
+
+def _effective_gold_action_ids(gold_action_ids: list[str]) -> list[str]:
+    """Collapses a monitoring-only gold action list to empty (pure
+    abstention) before it reaches anything abstention-sensitive - both
+    grade_process.py's Z2.11 check and judge.py's follow-up scoring read
+    "empty gold_action_ids" as "abstention expected" already, so this is
+    the one place that needs to know about the equivalence."""
+    if gold_action_ids and all(a in _MONITORING_ONLY_IDS for a in gold_action_ids):
+        return []
+    return gold_action_ids
+
 
 def _extract_written_note(saved_notes: dict[str, dict[str, str]]) -> tuple[str, str, str]:
     """The report is one continuous free-text block now (per explicit user
@@ -226,7 +263,8 @@ def grade_episode(episode_dir: Path) -> dict:
     if gold is None:
         raise ValueError(f"No gold found for {patient_id}/{visit_date} - can't grade Accuracy Axis for this visit.")
 
-    process_items = grade_process(log_path, patient_id, visit_date, gold.gold_action_ids)
+    effective_gold_action_ids = _effective_gold_action_ids(gold.gold_action_ids)
+    process_items = grade_process(log_path, patient_id, visit_date, effective_gold_action_ids)
 
     # Prefer whatever real note form(s) the agent actually wrote into
     # OpenEMR (genuine per-patient/per-encounter artifacts) over our own
@@ -285,13 +323,13 @@ def grade_episode(episode_dir: Path) -> dict:
         gold_findings=gold.findings,
         gold_impressions=gold.impressions,
         model_follow_up=model_follow_up_actions,
-        gold_action_ids=gold.gold_action_ids,
+        gold_action_ids=effective_gold_action_ids,
         gold_recommendation=gold.gold_recommendation,
     )
 
     written_followup_judgement: FollowupJudgement | None = None
     if model_written_followup:
-        written_followup_judgement = judge_followup(model_written_followup, gold.gold_action_ids, gold.gold_recommendation)
+        written_followup_judgement = judge_followup(model_written_followup, effective_gold_action_ids, gold.gold_recommendation)
 
     rows = []
     for item in process_items:
