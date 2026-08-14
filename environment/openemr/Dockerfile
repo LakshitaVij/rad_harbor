@@ -9,3 +9,6 @@ RUN patch -p1 < xray_viewer_form.patch \
     && patch -p1 < xray-viewer-open-label.patch \
     && patch -p1 < xray_dashboard_link.patch \
     && rm xray_viewer_form.patch xray-viewer-open-label.patch xray_dashboard_link.patch
+
+COPY sqlconf.php sites/default/sqlconf.php
+RUN chown apache:apache sites/default/sqlconf.php && chmod 400 sites/default/sqlconf.php
