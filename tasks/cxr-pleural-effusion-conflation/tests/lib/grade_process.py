@@ -634,7 +634,15 @@ def score_step_efficiency(entries: list[dict], process_items: list[ScoreItem], g
     min_actions = max(1, len(gold_action_ids))
     minimum_steps = STEP_EFFICIENCY_FIXED_OVERHEAD + STEP_EFFICIENCY_INTERACTION_BUFFER + min_actions
     extra_steps = max(0, actual_steps - minimum_steps)
-    penalty = round(-0.25 * extra_steps, 2)
+    # Capped at -2.0 (8 extra steps) - uncapped, this was the only
+    # unbounded component in the whole Process axis: with
+    # MAX_STEPS_DEFAULT=120 and a ~18-step minimum, a slow-but-otherwise-
+    # correct episode could accumulate roughly -25 from step count alone,
+    # more than every other Process checkpoint combined, forcing
+    # process_norm to clamp at 0 regardless of how well everything else
+    # scored. The cap is what makes a fixed, real PROCESS_FLOOR possible
+    # (see grade_episode.py) - found in grader QA.
+    penalty = max(-2.0, round(-0.25 * extra_steps, 2))
 
     action_count_matches = len(valid_ids) == len(gold_action_ids)
     fully_completed = _episode_fully_completed(process_items, action_count_matches)

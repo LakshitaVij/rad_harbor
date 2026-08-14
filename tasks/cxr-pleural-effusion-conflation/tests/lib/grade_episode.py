@@ -128,15 +128,21 @@ def _load_episode_summary(log_path: Path) -> dict:
 
 
 # Process axis bounds are fixed - identical for every episode regardless of
-# task complexity. Used to scale with gold_n while Z2.12 (action count
-# calibration) existed, since its missing-action penalty was direct and
-# uncapped - but Z2.12 was removed (it double-counted the same fact A3
-# already scores on the Accuracy axis; see grade_process.py's docstring),
-# so Process no longer has any unbounded/per-episode-scaling component and
-# the floor is back to a plain constant. Shifted by +-1 from the prior
-# [-12.25, 11.0] when Z1.8 (engages prior imaging) was added - one more
-# +1/-1 checkpoint in the Z1 sum.
-PROCESS_FLOOR, PROCESS_CEILING = -12.5, 12.0
+# task complexity - recomputed directly from the actual per-checkpoint
+# ranges in grade_process.py (the prior -12.5/12.0 were stale and didn't
+# match what the code could actually produce - found in grader QA):
+#   Ceiling: Z1 (+1 x8 = +8) + Z2.9 (+1) + Z2.10 (+1) + Z2.11 (+1) +
+#     Z2.13 (+1 bonus) + documentation-saved (+1) = 13.0
+#   Floor:   Z1 (-8.5) + Z2.9 (-1) + Z2.10 (-1) + Z2.11 (-2, worst real
+#     branch) + Z2.13 (-2.0, now CAPPED - see score_step_efficiency) +
+#     documentation-saved (-0.25) = -14.75
+# Z2.13's step-efficiency penalty used to be uncapped (-0.25/extra step,
+# no floor) - the only unbounded component in Process, able on its own to
+# swing further negative than the entire rest of the axis combined for a
+# slow-but-correct episode, clamping process_norm to 0 regardless of every
+# other checkpoint. Capping it at -2.0 in grade_process.py is what makes a
+# fixed, bounded PROCESS_FLOOR possible again.
+PROCESS_FLOOR, PROCESS_CEILING = -14.75, 13.0
 
 # Per-item ceiling/floor for each Accuracy sub-axis, from judge.py's actual
 # point values (worst case here means "still matched, but scored badly on
