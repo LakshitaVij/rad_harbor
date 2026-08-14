@@ -1,3 +1,0 @@
-CREATE USER IF NOT EXISTS 'openemr'@'%' IDENTIFIED BY 'openemr';
-GRANT ALL PRIVILEGES ON openemr.* TO 'openemr'@'%';
-FLUSH PRIVILEGES;

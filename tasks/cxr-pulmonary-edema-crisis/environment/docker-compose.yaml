@@ -22,7 +22,7 @@ services:
   # container directly (not over the network), so mysql never needs to be
   # reachable by anything except openemr.
   mysql:
-    image: ghcr.io/lakshitavij/rad_harbor/mysql:latest
+    build: ./mysql
     networks:
       - db_net
     environment:
@@ -38,15 +38,16 @@ services:
       timeout: 5s
       retries: 3
 
-  # Custom image: stock openemr/openemr:flex plus the xray_viewer form module
-  # and oe-module-xray-dashboard-link, which are NOT part of upstream OpenEMR
-  # (confirmed via `git status` on the source checkout these were copied from -
-  # both are untracked local additions). See environment/openemr/Dockerfile.
+  # Custom image, built locally from ./openemr/Dockerfile: stock
+  # openemr/openemr:8.3.0 plus the xray_viewer form module and
+  # oe-module-xray-dashboard-link, which are NOT part of upstream OpenEMR
+  # (confirmed via `git status` on the source checkout these were copied
+  # from - both are untracked local additions).
   # On both networks: default to be reachable by main and to reach
   # orthanc (its DICOMweb proxy calls Orthanc server-side - main's browser
   # never talks to Orthanc directly), db_net to reach mysql.
   openemr:
-    image: ghcr.io/lakshitavij/rad_harbor/openemr:latest
+    build: ./openemr
     networks:
       - default
       - db_net
